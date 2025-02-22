@@ -14,6 +14,9 @@ import getpass
 from typing import Tuple, Optional
 import socket
 import requests
+import threading
+import queue
+import datetime
 
 # ANSI colors
 class Colors:
@@ -706,18 +709,275 @@ external-ip=auto
     
     return secret_key, turn_secret
 
+class InstallationProgress:
+    def __init__(self):
+        self.current_step = 0
+        self.total_steps = 10  # Total number of main installation steps
+        self.current_operation = ""
+        self.start_time = datetime.datetime.now()
+        self._stop_spinner = False
+        self.spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self.spinner_idx = 0
+        
+    def update_step(self, step: int, operation: str):
+        self.current_step = step
+        self.current_operation = operation
+        self.show_progress()
+    
+    def show_progress(self):
+        elapsed = datetime.datetime.now() - self.start_time
+        percent = (self.current_step / self.total_steps) * 100
+        print(f"\r{Colors.BLUE}[*]{Colors.NC} Progress: [{self.current_step}/{self.total_steps}] {percent:.1f}% - {self.current_operation}")
+        print(f"{Colors.BLUE}[*]{Colors.NC} Time elapsed: {str(elapsed).split('.')[0]}")
+
+    def start_spinner(self, message: str):
+        self._stop_spinner = False
+        threading.Thread(target=self._spin, args=(message,), daemon=True).start()
+    
+    def stop_spinner(self):
+        self._stop_spinner = True
+        time.sleep(0.1)  # Give spinner time to stop
+        print()  # New line after spinner stops
+    
+    def _spin(self, message: str):
+        while not self._stop_spinner:
+            print(f"\r{Colors.BLUE}[{self.spinner_chars[self.spinner_idx]}]{Colors.NC} {message}", end="")
+            self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_chars)
+            time.sleep(0.1)
+
+class TroubleshootingMenu:
+    def __init__(self):
+        self.progress = None
+    
+    def set_progress(self, progress: InstallationProgress):
+        self.progress = progress
+    
+    def show_menu(self, context: str, logs_cmd: str = None) -> bool:
+        """Show troubleshooting menu and return whether to continue"""
+        print_warning(f"\nOperation taking longer than expected: {context}")
+        print("\nTroubleshooting Options:")
+        print("1. Continue waiting")
+        print("2. View logs/diagnostics")
+        print("3. Attempt automatic fix")
+        print("4. Cancel installation")
+        
+        while True:
+            choice = input("\nChoose an option (1-4): ").strip()
+            
+            if choice == "1":
+                return True
+            elif choice == "2":
+                self._show_diagnostics(context, logs_cmd)
+                return self.show_menu(context, logs_cmd)  # Show menu again after viewing logs
+            elif choice == "3":
+                if self._attempt_fix(context):
+                    return True
+                return self.show_menu(context, logs_cmd)  # Show menu again if fix wasn't successful
+            elif choice == "4":
+                if input("Are you sure you want to cancel? (y/N): ").lower() == 'y':
+                    print_error("Installation cancelled by user")
+                    sys.exit(1)
+            else:
+                print_error("Invalid choice")
+    
+    def _show_diagnostics(self, context: str, logs_cmd: str = None):
+        """Show relevant logs and diagnostics"""
+        print_debug("\nGathering diagnostic information...")
+        
+        if logs_cmd:
+            print_debug(f"Logs for {context}:")
+            returncode, stdout, stderr = run_command(logs_cmd)
+            print(stdout)
+        
+        print_debug("\nSystem Status:")
+        run_command("free -h")  # Memory usage
+        run_command("df -h")    # Disk usage
+        run_command("top -b -n 1 | head -n 20")  # Process status
+        
+        input("\nPress Enter to continue...")
+    
+    def _attempt_fix(self, context: str) -> bool:
+        """Attempt to automatically fix common issues"""
+        print_debug(f"Attempting to fix issues with {context}...")
+        
+        if "package manager" in context.lower():
+            return self._fix_package_manager()
+        elif "docker" in context.lower():
+            return self._fix_docker()
+        elif "certbot" in context.lower():
+            return self._fix_certbot()
+        elif "conduwuit" in context.lower():
+            return self._fix_conduwuit()
+        
+        print_warning("No automatic fix available for this issue")
+        return False
+    
+    def _fix_package_manager(self) -> bool:
+        """Fix common package manager issues"""
+        print_debug("Attempting to fix package manager...")
+        
+        # Kill stuck processes
+        processes = ["unattended-upgr", "apt-get", "dpkg"]
+        for proc in processes:
+            kill_stuck_process(proc)
+        
+        # Remove lock files
+        check_and_fix_locks()
+        
+        # Reconfigure packages
+        run_command("dpkg --configure -a")
+        
+        return True
+    
+    def _fix_docker(self) -> bool:
+        """Fix common Docker issues"""
+        print_debug("Attempting to fix Docker...")
+        
+        run_command("systemctl restart docker")
+        time.sleep(2)
+        
+        returncode, stdout, stderr = run_command("systemctl is-active docker")
+        return returncode == 0
+    
+    def _fix_certbot(self) -> bool:
+        """Fix common Certbot issues"""
+        print_debug("Attempting to fix Certbot...")
+        
+        run_command("snap remove certbot")
+        time.sleep(2)
+        run_command("snap install --classic certbot")
+        run_command("ln -sf /snap/bin/certbot /usr/bin/certbot")
+        
+        returncode, stdout, stderr = run_command("which certbot")
+        return returncode == 0
+    
+    def _fix_conduwuit(self) -> bool:
+        """Fix common Conduwuit issues"""
+        print_debug("Attempting to fix Conduwuit...")
+        
+        run_command("docker-compose down")
+        time.sleep(2)
+        run_command("docker-compose up -d")
+        
+        return True
+
+# Initialize global progress tracker and troubleshooting menu
+progress = InstallationProgress()
+troubleshoot = TroubleshootingMenu()
+troubleshoot.set_progress(progress)
+
+def wait_for_operation(operation: str, check_func, timeout: int = 60, check_interval: int = 5, logs_cmd: str = None) -> bool:
+    """Wait for an operation to complete with progress tracking and troubleshooting"""
+    start_time = time.time()
+    progress.start_spinner(f"Waiting for {operation}...")
+    
+    while time.time() - start_time < timeout:
+        if check_func():
+            progress.stop_spinner()
+            return True
+            
+        if time.time() - start_time > timeout // 2:  # Show menu after half the timeout
+            progress.stop_spinner()
+            if not troubleshoot.show_menu(operation, logs_cmd):
+                return False
+            progress.start_spinner(f"Continuing to wait for {operation}...")
+            
+        time.sleep(check_interval)
+    
+    progress.stop_spinner()
+    return False
+
 def main():
     """Main installation function"""
     try:
+        # Initialize progress
+        progress.update_step(0, "Starting installation")
+        
+        # System checks
+        progress.update_step(1, "Checking system requirements")
         check_root()
         check_system()
         check_ports()
+        
+        # Package installation
+        progress.update_step(2, "Installing required packages")
         install_packages()
+        
+        # Docker installation
+        progress.update_step(3, "Installing Docker")
         install_docker()
+        
+        # Docker Compose installation
+        progress.update_step(4, "Installing Docker Compose")
         install_docker_compose()
         
+        # Get user input
+        progress.update_step(5, "Configuring installation")
         matrix_domain, turn_domain, email, admin_user, admin_pass = get_user_input()
+        
+        # Setup Conduwuit
+        progress.update_step(6, "Setting up Conduwuit")
         secret_key, turn_secret = setup_conduwuit(matrix_domain, turn_domain, email, admin_user, admin_pass)
+        
+        # Wait for services
+        progress.update_step(7, "Waiting for services to start")
+        def check_services():
+            returncode, stdout, stderr = run_command("docker-compose ps -a")
+            if "Exit" in stdout or "Restarting" in stdout:
+                return False
+            returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
+            return returncode == 0 and stdout.strip() == "200"
+        
+        if not wait_for_operation(
+            "services to become healthy",
+            check_services,
+            timeout=120,
+            check_interval=5,
+            logs_cmd="docker-compose logs --tail=50"
+        ):
+            print_error("Services failed to start properly")
+            sys.exit(1)
+        
+        # Create admin user
+        progress.update_step(8, "Creating admin user")
+        def check_admin_user():
+            cmd = f"docker-compose exec -T conduwuit register_new_matrix_user -c /data/conduwuit.toml -u {admin_user} -p {admin_pass} -a"
+            returncode, stdout, stderr = run_command(cmd)
+            return returncode == 0
+        
+        if not wait_for_operation(
+            "admin user creation",
+            check_admin_user,
+            timeout=60,
+            check_interval=5,
+            logs_cmd="docker-compose logs conduwuit"
+        ):
+            print_error("Failed to create admin user")
+            sys.exit(1)
+        
+        # Final verification
+        progress.update_step(9, "Verifying installation")
+        def check_final():
+            # Check if services are running
+            returncode, stdout, stderr = run_command("docker-compose ps -a")
+            if "Exit" in stdout or "Restarting" in stdout:
+                return False
+            # Check if we can access the server
+            returncode, stdout, stderr = run_command(f"curl -sk https://{matrix_domain}/_matrix/client/versions")
+            return returncode == 0
+        
+        if not wait_for_operation(
+            "final verification",
+            check_final,
+            timeout=30,
+            check_interval=5,
+            logs_cmd="docker-compose logs"
+        ):
+            print_error("Final verification failed")
+            sys.exit(1)
+        
+        # Installation complete
+        progress.update_step(10, "Installation complete")
         
         # Print success message
         print_message("\nInstallation complete!")
