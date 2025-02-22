@@ -108,7 +108,8 @@ def install_packages() -> None:
         'lsb-release',
         'software-properties-common',
         'net-tools',
-        'snapd'
+        'snapd',
+        'python3-yaml'
     ]
     
     print_debug("Installing basic packages...")
@@ -305,6 +306,33 @@ def get_ssl_certificate(domain: str, email: str) -> None:
     
     print_debug("SSL certificate files verified")
 
+def create_conduwuit_config(domain: str, secret_key: str, turn_secret: str) -> None:
+    """Create Conduwuit configuration file"""
+    print_debug("Creating Conduwuit configuration...")
+    config = {
+        "server_name": domain,
+        "database_path": "/data/conduwuit.db",
+        "signing_key": secret_key,
+        "enable_registration": False,
+        "report_stats": False,
+        "turn": {
+            "uris": [f"turn:{domain}:3478"],
+            "secret": turn_secret,
+            "ttl": 86400
+        },
+        "tls": {
+            "certs": "/certs/fullchain.pem",
+            "key": "/certs/privkey.pem"
+        }
+    }
+    
+    data_dir = Path("/opt/conduwuit/data")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
+    import yaml
+    with open(data_dir / "conduwuit.yaml", "w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+
 def setup_conduwuit(domain: str, email: str, admin_user: str, admin_pass: str) -> None:
     """Setup Conduwuit"""
     install_dir = Path("/opt/conduwuit")
@@ -350,14 +378,7 @@ services:
       - ./data:/data
       - ./certs:/certs
     environment:
-      - CONDUWUIT_SERVER_NAME={domain}
-      - CONDUWUIT_REPORT_STATS=false
-      - CONDUWUIT_DATABASE_PATH=/data/conduwuit.db
-      - CONDUWUIT_SIGNING_KEY={secret_key}
-      - CONDUWUIT_ENABLE_REGISTRATION=false
-      - CONDUWUIT_TURN_URI=turn:{domain}:3478
-      - CONDUWUIT_TURN_SECRET={turn_secret}
-      - CONDUWUIT_TURN_TTL=86400
+      - CONDUWUIT_CONFIG=/data/conduwuit.yaml
 
   coturn:
     image: coturn/coturn:latest
@@ -368,6 +389,9 @@ services:
     depends_on:
       - conduwuit
 """)
+    
+    # Create Conduwuit config
+    create_conduwuit_config(domain, secret_key, turn_secret)
     
     # Get SSL certificate
     get_ssl_certificate(domain, email)
@@ -391,15 +415,7 @@ services:
     
     # Wait for services
     print_debug("Waiting for services to be ready...")
-    time.sleep(10)
-    
-    # Verify services
-    returncode, stdout, stderr = run_command("docker-compose ps")
-    if "Up" not in stdout:
-        print_error("Services failed to start")
-        print_debug("Container logs:")
-        run_command("docker-compose logs")
-        sys.exit(1)
+    time.sleep(30)  # Increased wait time to ensure service is fully ready
     
     # Create admin user
     print_message("Creating admin user...")
@@ -410,10 +426,12 @@ services:
         if returncode == 0:
             break
         if i < max_retries - 1:
-            print_warning("Failed to create admin user, retrying...")
-            time.sleep(5)
+            print_warning(f"Failed to create admin user (attempt {i+1}/{max_retries}), retrying in 10 seconds...")
+            print_debug(f"Error: {stderr}")
+            time.sleep(10)
         else:
             print_error("Failed to create admin user")
+            print_error(f"Error: {stderr}")
             print_debug("Container logs:")
             run_command("docker-compose logs conduwuit")
             sys.exit(1)
