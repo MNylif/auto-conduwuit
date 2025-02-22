@@ -109,7 +109,8 @@ def install_packages() -> None:
         'software-properties-common',
         'net-tools',
         'snapd',
-        'python3-yaml'
+        'python3-yaml',
+        'curl'  # Ensure curl is installed for healthcheck
     ]
     
     print_debug("Installing basic packages...")
@@ -365,12 +366,10 @@ stale-nonce=0
     # Create docker-compose.yml
     print_message("Creating Docker Compose configuration...")
     with open("docker-compose.yml", "w") as f:
-        f.write(f"""version: '3'
-
-services:
+        f.write(f"""services:
   conduwuit:
     image: ghcr.io/girlbossceo/conduwuit:latest
-    restart: always
+    restart: unless-stopped
     ports:
       - "80:8000"
       - "443:8443"
@@ -379,10 +378,16 @@ services:
       - ./certs:/certs
     environment:
       - CONDUWUIT_CONFIG=/data/conduwuit.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/_matrix/client/versions"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   coturn:
     image: coturn/coturn:latest
-    restart: always
+    restart: unless-stopped
     network_mode: host
     volumes:
       - ./coturn.conf:/etc/coturn/turnserver.conf:ro
@@ -413,9 +418,34 @@ services:
     run_command("docker-compose pull")
     run_command("docker-compose up -d")
     
-    # Wait for services
+    # Wait for services and check health
     print_debug("Waiting for services to be ready...")
-    time.sleep(30)  # Increased wait time to ensure service is fully ready
+    max_wait_time = 60  # Maximum wait time in seconds
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait_time:
+        # Check container status
+        returncode, stdout, stderr = run_command("docker-compose ps -a")
+        if "Exit" in stdout or "Restarting" in stdout:
+            print_debug("Container is restarting or exited, checking logs...")
+            returncode, stdout, stderr = run_command("docker-compose logs conduwuit")
+            print_debug(f"Container logs:\n{stdout}")
+            time.sleep(5)
+            continue
+            
+        # Try to access the health endpoint
+        returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
+        if returncode == 0 and stdout.strip() == "200":
+            print_debug("Service is healthy and responding")
+            break
+            
+        print_debug("Waiting for service to be ready...")
+        time.sleep(5)
+    else:
+        print_error("Service failed to become healthy within timeout")
+        print_debug("Container logs:")
+        run_command("docker-compose logs conduwuit")
+        sys.exit(1)
     
     # Create admin user
     print_message("Creating admin user...")
@@ -428,6 +458,11 @@ services:
         if i < max_retries - 1:
             print_warning(f"Failed to create admin user (attempt {i+1}/{max_retries}), retrying in 10 seconds...")
             print_debug(f"Error: {stderr}")
+            # Check container status and logs
+            returncode, stdout, stderr = run_command("docker-compose ps")
+            print_debug(f"Container status:\n{stdout}")
+            returncode, stdout, stderr = run_command("docker-compose logs --tail=50 conduwuit")
+            print_debug(f"Recent container logs:\n{stdout}")
             time.sleep(10)
         else:
             print_error("Failed to create admin user")
