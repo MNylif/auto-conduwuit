@@ -594,7 +594,8 @@ external-ip=auto
     # Create docker-compose.yml
     print_message("Creating Docker Compose configuration...")
     with open("docker-compose.yml", "w") as f:
-        f.write(f"""services:
+        f.write(f"""version: '3.8'
+services:
   conduwuit:
     image: ghcr.io/girlbossceo/conduwuit:latest
     restart: unless-stopped
@@ -606,12 +607,18 @@ external-ip=auto
       - ./certs:/certs
     environment:
       - CONDUWUIT_CONFIG=/data/conduwuit.toml
+      - RUST_LOG=info
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/_matrix/client/versions"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   coturn:
     image: coturn/coturn:latest
@@ -628,6 +635,11 @@ external-ip=auto
       - "49152-49252:49152-49252/udp"
     depends_on:
       - conduwuit
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 """)
     
     # Create Conduwuit config
@@ -651,61 +663,95 @@ external-ip=auto
     
     # Start services
     print_message("Starting services...")
-    run_command("docker-compose pull")
-    run_command("docker-compose up -d")
     
-    # Wait for services and check health
+    # Pull images first
+    print_debug("Pulling Docker images...")
+    returncode, stdout, stderr = run_command("docker-compose pull")
+    if returncode != 0:
+        print_error("Failed to pull Docker images")
+        print_error(f"Error: {stderr}")
+        sys.exit(1)
+    
+    # Stop any existing containers
+    print_debug("Stopping any existing containers...")
+    run_command("docker-compose down")
+    
+    # Start services with proper error handling
+    print_debug("Starting containers...")
+    returncode, stdout, stderr = run_command("docker-compose up -d")
+    if returncode != 0:
+        print_error("Failed to start containers")
+        print_error(f"Error: {stderr}")
+        sys.exit(1)
+    
+    # Wait for services and check health with improved diagnostics
     print_debug("Waiting for services to be ready...")
-    max_wait_time = 60  # Maximum wait time in seconds
+    max_wait_time = 120  # Increase timeout to 2 minutes
+    check_interval = 5
     start_time = time.time()
     
-    while time.time() - start_time < max_wait_time:
-        # Check container status
-        returncode, stdout, stderr = run_command("docker-compose ps -a")
+    def check_container_logs():
+        """Check container logs for common issues"""
+        returncode, stdout, stderr = run_command("docker-compose logs --tail=50")
+        logs = stdout.lower()
+        
+        # Check for common error patterns
+        if "error" in logs or "failed" in logs or "panic" in logs:
+            print_warning("Found potential issues in container logs:")
+            print(stdout)
+            return False
+        return True
+    
+    def check_container_status():
+        """Check detailed container status"""
+        returncode, stdout, stderr = run_command("docker-compose ps")
         if "Exit" in stdout or "Restarting" in stdout:
-            print_debug("Container is restarting or exited, checking logs...")
-            returncode, stdout, stderr = run_command("docker-compose logs conduwuit")
-            print_debug(f"Container logs:\n{stdout}")
-            time.sleep(5)
-            continue
+            print_warning("Container status shows issues:")
+            print(stdout)
+            return False
+        return True
+    
+    while time.time() - start_time < max_wait_time:
+        # Print progress
+        elapsed = int(time.time() - start_time)
+        remaining = max_wait_time - elapsed
+        print_progress(elapsed, max_wait_time, 
+                      prefix="Waiting for services:", 
+                      suffix=f"Time remaining: {remaining}s")
+        
+        # Check container status
+        if not check_container_status():
+            print_debug("Checking container logs for issues...")
+            check_container_logs()
             
+            # Show troubleshooting menu
+            if not troubleshoot.show_menu("container startup", "docker-compose logs"):
+                return False
+            continue
+        
         # Try to access the health endpoint
         returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
         if returncode == 0 and stdout.strip() == "200":
-            print_debug("Service is healthy and responding")
+            print_message("\nService is healthy and responding")
             break
+        
+        # If we've waited more than half the timeout, show detailed status
+        if elapsed > max_wait_time // 2:
+            print_debug("\nDetailed service status:")
+            run_command("docker-compose ps")
+            run_command("docker-compose logs --tail=20")
             
-        print_debug("Waiting for service to be ready...")
-        time.sleep(5)
+            # Show troubleshooting menu
+            if not troubleshoot.show_menu("service health check", "docker-compose logs"):
+                return False
+        
+        time.sleep(check_interval)
     else:
-        print_error("Service failed to become healthy within timeout")
-        print_debug("Container logs:")
-        run_command("docker-compose logs conduwuit")
+        print_error("\nService failed to become healthy within timeout")
+        print_error("Detailed diagnostics:")
+        run_command("docker-compose ps")
+        run_command("docker-compose logs")
         sys.exit(1)
-    
-    # Create admin user
-    print_message("Creating admin user...")
-    max_retries = 3
-    for i in range(max_retries):
-        cmd = f"docker-compose exec -T conduwuit register_new_matrix_user -c /data/conduwuit.toml -u {admin_user} -p {admin_pass} -a"
-        returncode, stdout, stderr = run_command(cmd)
-        if returncode == 0:
-            break
-        if i < max_retries - 1:
-            print_warning(f"Failed to create admin user (attempt {i+1}/{max_retries}), retrying in 10 seconds...")
-            print_debug(f"Error: {stderr}")
-            # Check container status and logs
-            returncode, stdout, stderr = run_command("docker-compose ps")
-            print_debug(f"Container status:\n{stdout}")
-            returncode, stdout, stderr = run_command("docker-compose logs --tail=50 conduwuit")
-            print_debug(f"Recent container logs:\n{stdout}")
-            time.sleep(10)
-        else:
-            print_error("Failed to create admin user")
-            print_error(f"Error: {stderr}")
-            print_debug("Container logs:")
-            run_command("docker-compose logs conduwuit")
-            sys.exit(1)
     
     return secret_key, turn_secret
 
