@@ -4,35 +4,41 @@ This is an automated installation script for setting up a Conduwuit server using
 
 ## Quick Start
 
-To install Conduwuit, you can use either the Python script (recommended) or shell script:
+To install Conduwuit, run this command:
 
 ```bash
-# Using Python (Recommended)
 curl -fsSL https://raw.githubusercontent.com/MNylif/auto-conduwuit/main/install.py -o install.py && sudo python3 install.py
-
-# Using Shell Script (Legacy)
-curl -fsSL https://raw.githubusercontent.com/MNylif/auto-conduwuit/main/install.sh | sudo bash
 ```
 
 ## What the Script Does
 
-1. Installs system dependencies
-2. Installs and configures Docker
-3. Installs Docker Compose
-4. Installs Certbot for SSL certificates
-5. Sets up Conduwuit with Docker
-6. Configures SSL certificates
+1. Checks system requirements and port availability
+2. Installs system dependencies (including certbot)
+3. Installs and configures Docker
+4. Installs Docker Compose
+5. Obtains SSL certificates via Let's Encrypt
+6. Sets up Conduwuit with Docker
 7. Creates admin account
 8. Installs and configures Coturn TURN server for voice/video calls
 
 ## Requirements
 
 - A VPS or server running Ubuntu/Debian
-- Python 3.6+ (for Python installer)
+- Python 3.6+
 - A domain name pointing to your server
 - Root/sudo access
 - Port 80 and 443 available for HTTPS
 - Ports 3478 (TURN) and 49152-49252 (RTP) available for voice/video calls
+
+## Features
+
+- Automated dependency installation
+- Secure configuration out of the box
+- Automatic SSL certificate generation
+- TURN server for voice/video calls
+- Docker-based deployment
+- Detailed progress information
+- Comprehensive error handling
 
 ## Interactive Prompts
 
@@ -59,23 +65,36 @@ After installation, your Conduwuit instance will be:
 - Start server: `docker-compose up -d`
 - Restart server: `docker-compose restart`
 
-## Security
+## Security Features
 
-- SSL certificates are automatically obtained and configured
-- Admin registration is disabled by default
-- Secure random signing key is generated
+- SSL certificates automatically obtained and configured
+- Admin registration disabled by default
+- Secure random signing key generated
 - TURN server configured with authentication
-- All credentials are collected securely
+- All credentials collected securely
+- Proper file permissions
+- Safe secret handling
 
-## Advantages of Python Installer
+## Error Handling
 
-- Better error handling and debugging
-- No interactive package prompts
+The script includes robust error handling:
+- Pre-flight system checks
+- Port availability verification
+- Package installation verification
+- SSL certificate generation retries
+- Service health checks
+- Detailed error messages
 - Automatic retry mechanisms
-- More detailed progress information
-- Better system requirement checks
-- Proper port availability verification
-- Improved service health checks
+
+## Troubleshooting
+
+If you encounter issues:
+
+1. Check the logs using `docker-compose logs`
+2. Ensure all required ports are available
+3. Verify your domain points to the server
+4. Make sure you have Python 3.6+ installed
+5. Run the script with sudo/root privileges
 
 ## Support
 
