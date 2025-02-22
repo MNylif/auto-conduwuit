@@ -169,6 +169,41 @@ def install_packages() -> None:
     
     print_debug("Certbot installation verified successfully")
 
+def print_progress(iteration, total, prefix='', suffix='', length=50, fill='█'):
+    """Print a progress bar"""
+    percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
+    if iteration == total:
+        print()
+
+def kill_stuck_process(process_name: str) -> bool:
+    """Attempt to kill a stuck process"""
+    print_warning(f"Attempting to kill stuck {process_name} process...")
+    returncode, stdout, stderr = run_command(f"pkill {process_name}")
+    if returncode == 0:
+        print_message(f"Successfully killed {process_name} process")
+        return True
+    return False
+
+def check_and_fix_locks():
+    """Check for and attempt to fix package manager locks"""
+    lock_files = [
+        "/var/lib/dpkg/lock-frontend",
+        "/var/lib/apt/lists/lock",
+        "/var/lib/dpkg/lock"
+    ]
+    
+    for lock_file in lock_files:
+        if os.path.exists(lock_file):
+            print_warning(f"Removing lock file: {lock_file}")
+            try:
+                os.remove(lock_file)
+                print_message(f"Successfully removed {lock_file}")
+            except Exception as e:
+                print_error(f"Failed to remove {lock_file}: {str(e)}")
+
 def install_docker() -> None:
     """Install Docker"""
     print_message("Installing Docker...")
@@ -198,16 +233,72 @@ def install_docker() -> None:
     
     # Wait for package manager to be available
     max_wait_time = 300  # 5 minutes
+    check_interval = 5  # Check every 5 seconds
+    total_checks = max_wait_time // check_interval
     start_time = time.time()
-    while check_package_locks():
-        if time.time() - start_time > max_wait_time:
-            print_error("Timeout waiting for package manager locks to be released")
-            print_error("Please try again later or run these commands manually:")
-            print_error("1. sudo apt-get update")
-            print_error("2. curl -fsSL https://get.docker.com | sudo sh")
-            sys.exit(1)
-        print_debug("Waiting for package manager to be available (this may take a few minutes)...")
-        time.sleep(10)
+    consecutive_same_state = 0
+    last_state = None
+    
+    for i in range(total_checks):
+        current_time = time.time() - start_time
+        current_state = check_package_locks()
+        
+        # Print progress
+        print_progress(i + 1, total_checks, 
+                      prefix='Waiting for package manager:', 
+                      suffix=f'Time elapsed: {int(current_time)}s')
+        
+        if not current_state:
+            print_message("\nPackage manager is now available")
+            break
+            
+        # Check if state hasn't changed
+        if current_state == last_state:
+            consecutive_same_state += 1
+        else:
+            consecutive_same_state = 0
+        
+        # If stuck in same state for too long, try to fix
+        if consecutive_same_state >= 6:  # 30 seconds in same state
+            print_warning("\nPackage manager appears to be stuck")
+            
+            # Try to fix the situation
+            if kill_stuck_process("unattended-upgr"):
+                time.sleep(2)
+            if kill_stuck_process("dpkg"):
+                time.sleep(2)
+            check_and_fix_locks()
+            
+            # Ask user what to do
+            print_warning("\nOptions:")
+            print("1. Continue waiting")
+            print("2. Try to force remove locks")
+            print("3. Exit and try again later")
+            
+            choice = input("Choose an option (1-3): ").strip()
+            if choice == "2":
+                check_and_fix_locks()
+                # Wait a bit after fixing locks
+                time.sleep(5)
+            elif choice == "3":
+                print_error("Installation cancelled by user")
+                sys.exit(1)
+            
+            consecutive_same_state = 0
+        
+        last_state = current_state
+        time.sleep(check_interval)
+        
+    if check_package_locks():
+        print_error("\nTimeout waiting for package manager locks to be released")
+        print_error("Please try these steps:")
+        print_error("1. Wait a few minutes and try again")
+        print_error("2. Run these commands to fix stuck locks:")
+        print_error("   sudo killall apt apt-get dpkg unattended-upgr")
+        print_error("   sudo rm /var/lib/dpkg/lock*")
+        print_error("   sudo rm /var/lib/apt/lists/lock")
+        print_error("   sudo dpkg --configure -a")
+        sys.exit(1)
     
     # Download Docker install script
     print_debug("Downloading Docker install script...")
@@ -217,34 +308,58 @@ def install_docker() -> None:
         print_error(f"Failed to download Docker install script: {str(e)}")
         sys.exit(1)
     
-    # Install Docker with retry logic
+    # Install Docker with retry logic and progress indicator
     print_debug("Installing Docker...")
     max_retries = 3
     for i in range(max_retries):
-        returncode, stdout, stderr = run_command("sh get-docker.sh")
+        print_message(f"Docker installation attempt {i+1}/{max_retries}")
+        
+        process = subprocess.Popen(
+            ["sh", "get-docker.sh"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        
+        while True:
+            output = process.stdout.readline()
+            if output == '' and process.poll() is not None:
+                break
+            if output:
+                print_debug(output.strip())
+        
+        returncode = process.poll()
         if returncode == 0:
             break
+            
         if i < max_retries - 1:
-            print_warning(f"Docker installation attempt {i+1}/{max_retries} failed. Retrying in 10 seconds...")
-            print_debug(f"Error: {stderr}")
+            print_warning(f"Docker installation attempt {i+1} failed. Retrying in 10 seconds...")
             time.sleep(10)
         else:
             print_error("Docker installation failed after multiple attempts")
-            print_error(f"Error: {stderr}")
             print_error("Please try installing Docker manually:")
             print_error("curl -fsSL https://get.docker.com | sudo sh")
             sys.exit(1)
     
-    # Start Docker service
+    # Start Docker service with progress indicator
     print_debug("Starting Docker service...")
-    run_command("systemctl start docker")
-    run_command("systemctl enable docker")
-    
-    # Verify Docker is running
-    returncode, stdout, stderr = run_command("systemctl is-active docker")
-    if returncode != 0:
-        print_error("Docker service is not running")
+    max_wait = 30
+    for i in range(max_wait):
+        print_progress(i + 1, max_wait, prefix='Starting Docker service:', suffix='Please wait...')
+        returncode, stdout, stderr = run_command("systemctl is-active docker")
+        if returncode == 0:
+            print_message("\nDocker service started successfully")
+            break
+        run_command("systemctl start docker")
+        time.sleep(1)
+    else:
+        print_error("\nFailed to start Docker service")
+        print_error("Please check Docker service status:")
+        print_error("sudo systemctl status docker")
         sys.exit(1)
+    
+    # Enable Docker service
+    run_command("systemctl enable docker")
     
     # Clean up install script
     try:
