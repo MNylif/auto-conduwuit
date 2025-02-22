@@ -4,9 +4,13 @@ This is an automated installation script for setting up a Conduwuit server using
 
 ## Quick Start
 
-To install Conduwuit, run this command:
+To install Conduwuit, you can use either the Python script (recommended) or shell script:
 
 ```bash
+# Using Python (Recommended)
+curl -fsSL https://raw.githubusercontent.com/MNylif/auto-conduwuit/main/install.py -o install.py && sudo python3 install.py
+
+# Using Shell Script (Legacy)
 curl -fsSL https://raw.githubusercontent.com/MNylif/auto-conduwuit/main/install.sh | sudo bash
 ```
 
@@ -24,6 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/MNylif/auto-conduwuit/main/install.
 ## Requirements
 
 - A VPS or server running Ubuntu/Debian
+- Python 3.6+ (for Python installer)
 - A domain name pointing to your server
 - Root/sudo access
 - Port 80 and 443 available for HTTPS
@@ -61,6 +66,16 @@ After installation, your Conduwuit instance will be:
 - Secure random signing key is generated
 - TURN server configured with authentication
 - All credentials are collected securely
+
+## Advantages of Python Installer
+
+- Better error handling and debugging
+- No interactive package prompts
+- Automatic retry mechanisms
+- More detailed progress information
+- Better system requirement checks
+- Proper port availability verification
+- Improved service health checks
 
 ## Support
 
