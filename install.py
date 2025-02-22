@@ -94,7 +94,8 @@ def install_packages() -> None:
         'gnupg',
         'lsb-release',
         'software-properties-common',
-        'net-tools'
+        'net-tools',
+        'certbot'
     ]
     
     # Update package list
@@ -110,6 +111,23 @@ def install_packages() -> None:
     if returncode != 0:
         print_error(f"Failed to install packages: {stderr}")
         sys.exit(1)
+
+    # Verify certbot installation
+    print_debug("Verifying certbot installation...")
+    returncode, stdout, stderr = run_command("which certbot")
+    if returncode != 0:
+        print_debug("Installing certbot via snap as fallback...")
+        run_command("apt-get install -y snapd")
+        run_command("snap install core")
+        run_command("snap refresh core")
+        run_command("snap install --classic certbot")
+        run_command("ln -sf /snap/bin/certbot /usr/bin/certbot")
+        
+        # Verify again
+        returncode, stdout, stderr = run_command("which certbot")
+        if returncode != 0:
+            print_error("Failed to install certbot")
+            sys.exit(1)
 
 def install_docker() -> None:
     """Install Docker"""
@@ -255,18 +273,40 @@ services:
     
     # Get SSL certificate
     print_message("Obtaining SSL certificate...")
-    cmd = f"certbot certonly --standalone -d {domain} --email {email} --agree-tos -n"
-    returncode, stdout, stderr = run_command(cmd)
-    if returncode != 0:
-        print_error(f"SSL certificate generation failed: {stderr}")
-        sys.exit(1)
+    
+    # Stop any services using port 80
+    print_debug("Stopping any services using port 80...")
+    run_command("systemctl stop apache2", shell=True)  # Common web server
+    run_command("systemctl stop nginx", shell=True)    # Common web server
+    
+    # Try to get SSL certificate
+    max_retries = 3
+    for i in range(max_retries):
+        print_debug(f"Attempting to obtain SSL certificate (attempt {i+1}/{max_retries})...")
+        cmd = f"certbot certonly --standalone --preferred-challenges http -d {domain} --email {email} --agree-tos -n"
+        returncode, stdout, stderr = run_command(cmd)
+        if returncode == 0:
+            break
+        if i < max_retries - 1:
+            print_warning(f"Failed to obtain SSL certificate: {stderr}")
+            print_debug("Retrying in 5 seconds...")
+            time.sleep(5)
+        else:
+            print_error(f"Failed to obtain SSL certificate after {max_retries} attempts")
+            print_error(f"Error: {stderr}")
+            sys.exit(1)
     
     # Copy SSL certificates
-    certs_dir = Path("certs")
-    certs_dir.mkdir(exist_ok=True)
-    shutil.copy(f"/etc/letsencrypt/live/{domain}/fullchain.pem", certs_dir)
-    shutil.copy(f"/etc/letsencrypt/live/{domain}/privkey.pem", certs_dir)
-    certs_dir.chmod(0o755)
+    print_debug("Copying SSL certificates...")
+    try:
+        certs_dir = Path("certs")
+        certs_dir.mkdir(exist_ok=True)
+        shutil.copy(f"/etc/letsencrypt/live/{domain}/fullchain.pem", certs_dir)
+        shutil.copy(f"/etc/letsencrypt/live/{domain}/privkey.pem", certs_dir)
+        certs_dir.chmod(0o755)
+    except Exception as e:
+        print_error(f"Failed to copy SSL certificates: {str(e)}")
+        sys.exit(1)
     
     # Start services
     print_message("Starting services...")
