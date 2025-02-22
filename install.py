@@ -13,6 +13,7 @@ import urllib.request
 import getpass
 from typing import Tuple, Optional
 import socket
+import requests
 
 # ANSI colors
 class Colors:
@@ -109,7 +110,8 @@ def install_packages() -> None:
         'software-properties-common',
         'net-tools',
         'snapd',
-        'curl'  # Ensure curl is installed for healthcheck
+        'curl',
+        'python3-requests'  # Added for IP detection
     ]
     
     print_debug("Installing basic packages...")
@@ -209,25 +211,59 @@ def get_user_input() -> Tuple[str, str, str, str]:
     """Get user input for configuration"""
     # Get domain name
     while True:
-        domain = input("Enter your domain name (e.g., conduwuit.example.com): ").strip()
+        domain = input("Enter your main domain (e.g., example.com): ").strip()
         if domain:
             break
         print_error("Domain name cannot be empty")
     
-    # Get TURN domain
-    while True:
-        turn_domain = input(f"Enter your TURN server domain (default: turn.{domain}): ").strip()
-        if not turn_domain:
-            turn_domain = f"turn.{domain}"
-        break
+    # Set subdomains
+    matrix_domain = f"matrix.{domain}"
+    turn_domain = f"turn.{domain}"
+    
+    # Get server IP
+    try:
+        ip = requests.get('https://api.ipify.org').text.strip()
+    except:
+        ip = input("Enter your server's public IP address: ").strip()
+    
+    # Print DNS setup instructions
+    print_message("\nDNS Setup Instructions:")
+    print_message("Please create the following A records in your DNS settings:")
+    print(f"  matrix.{domain}  A     {ip}")
+    print(f"  turn.{domain}    A     {ip}")
+    
+    print_warning("\nIf you're using Cloudflare:")
+    print("1. Set SSL/TLS encryption mode to 'Full (strict)'")
+    print("2. Create the following DNS records:")
+    print(f"  matrix.{domain}  A     {ip}  (Proxy status: DNS only/Grey cloud)")
+    print(f"  turn.{domain}    A     {ip}  (Proxy status: DNS only/Grey cloud)")
+    print("3. Create the following Page Rules:")
+    print(f"  URL: matrix.{domain}/*")
+    print("  Settings: SSL: Full")
+    
+    print_warning("\nIf you're using another reverse proxy:")
+    print("1. Ensure WebSocket support is enabled")
+    print("2. Configure SSL passthrough or terminate SSL and provide valid certificates")
+    print("3. Forward all traffic to the Conduwuit container")
+    print("4. Do not proxy TURN server traffic (ports 3478, 5349, 49152-49252)")
+    
+    if input("\nHave you configured these DNS records? (y/N): ").lower() != 'y':
+        print_warning("Please configure DNS records before continuing")
+        if input("Continue anyway? (y/N): ").lower() != 'y':
+            sys.exit(1)
     
     # Verify domains resolve
     print_debug("Verifying domain DNS...")
     try:
-        socket.gethostbyname(domain)
-        socket.gethostbyname(turn_domain)
+        resolved_ip = socket.gethostbyname(matrix_domain)
+        if resolved_ip != ip:
+            print_warning(f"Warning: {matrix_domain} resolves to {resolved_ip}, but your server IP is {ip}")
+        resolved_ip = socket.gethostbyname(turn_domain)
+        if resolved_ip != ip:
+            print_warning(f"Warning: {turn_domain} resolves to {resolved_ip}, but your server IP is {ip}")
     except socket.gaierror:
-        print_warning(f"Unable to resolve domain {domain} or {turn_domain}")
+        print_warning(f"Unable to resolve {matrix_domain} or {turn_domain}")
+        print_warning("DNS records may not have propagated yet")
         if input("Continue anyway? (y/N): ").lower() != 'y':
             sys.exit(1)
     
@@ -251,7 +287,7 @@ def get_user_input() -> Tuple[str, str, str, str]:
             break
         print_error("Admin password cannot be empty")
     
-    return domain, turn_domain, email, admin_user, admin_pass
+    return matrix_domain, turn_domain, email, admin_user, admin_pass
 
 def get_ssl_certificate(domain: str, email: str) -> None:
     """Get SSL certificate from Let's Encrypt"""
@@ -508,12 +544,12 @@ def main():
         install_docker()
         install_docker_compose()
         
-        domain, turn_domain, email, admin_user, admin_pass = get_user_input()
-        secret_key, turn_secret = setup_conduwuit(domain, turn_domain, email, admin_user, admin_pass)
+        matrix_domain, turn_domain, email, admin_user, admin_pass = get_user_input()
+        secret_key, turn_secret = setup_conduwuit(matrix_domain, turn_domain, email, admin_user, admin_pass)
         
         # Print success message
         print_message("\nInstallation complete!")
-        print_message(f"Your Conduwuit instance is now running at https://{domain}")
+        print_message(f"Your Conduwuit instance is now running at https://{matrix_domain}")
         print_message(f"TURN server is configured at:")
         print_message(f"- turn:{turn_domain}:3478 (UDP/TCP)")
         print_message(f"- turns:{turn_domain}:5349 (TLS)")
@@ -523,7 +559,28 @@ def main():
         print("Password: [HIDDEN]")
         
         print_warning("\nPlease save these credentials in a secure location!")
-        print_warning("Make sure both domains point to your server's IP address!")
+        print_warning("Make sure your DNS records are properly configured:")
+        print(f"  matrix.* → {matrix_domain}")
+        print(f"  turn.*  → {turn_domain}")
+        
+        if input("\nWould you like to see the DNS and proxy setup instructions again? (y/N): ").lower() == 'y':
+            print_message("\nDNS Setup Instructions:")
+            print("Please ensure these A records exist in your DNS settings:")
+            print(f"  {matrix_domain}  A     <your-server-ip>")
+            print(f"  {turn_domain}    A     <your-server-ip>")
+            
+            print_warning("\nIf you're using Cloudflare:")
+            print("1. Set SSL/TLS encryption mode to 'Full (strict)'")
+            print("2. Ensure both domains are set to DNS only (grey cloud)")
+            print("3. Configure these page rules:")
+            print(f"  URL: {matrix_domain}/*")
+            print("  Settings: SSL: Full")
+            
+            print_warning("\nIf you're using another reverse proxy:")
+            print("1. Enable WebSocket support")
+            print("2. Configure SSL properly")
+            print("3. Forward matrix traffic to the Conduwuit container")
+            print("4. Do not proxy TURN server traffic")
         
         print("\nManagement commands:")
         print_message("- View logs: docker-compose logs -f")
