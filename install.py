@@ -215,12 +215,20 @@ def get_user_input() -> Tuple[str, str, str, str]:
             break
         print_error("Domain name cannot be empty")
     
-    # Verify domain resolves
+    # Get TURN domain
+    while True:
+        turn_domain = input(f"Enter your TURN server domain (default: turn.{domain}): ").strip()
+        if not turn_domain:
+            turn_domain = f"turn.{domain}"
+        break
+    
+    # Verify domains resolve
     print_debug("Verifying domain DNS...")
     try:
         socket.gethostbyname(domain)
+        socket.gethostbyname(turn_domain)
     except socket.gaierror:
-        print_warning(f"Unable to resolve domain {domain}")
+        print_warning(f"Unable to resolve domain {domain} or {turn_domain}")
         if input("Continue anyway? (y/N): ").lower() != 'y':
             sys.exit(1)
     
@@ -244,7 +252,7 @@ def get_user_input() -> Tuple[str, str, str, str]:
             break
         print_error("Admin password cannot be empty")
     
-    return domain, email, admin_user, admin_pass
+    return domain, turn_domain, email, admin_user, admin_pass
 
 def get_ssl_certificate(domain: str, email: str) -> None:
     """Get SSL certificate from Let's Encrypt"""
@@ -307,7 +315,7 @@ def get_ssl_certificate(domain: str, email: str) -> None:
     
     print_debug("SSL certificate files verified")
 
-def create_conduwuit_config(domain: str, secret_key: str, turn_secret: str) -> None:
+def create_conduwuit_config(domain: str, turn_domain: str, secret_key: str, turn_secret: str) -> None:
     """Create Conduwuit configuration file"""
     print_debug("Creating Conduwuit configuration...")
     config = {
@@ -317,7 +325,10 @@ def create_conduwuit_config(domain: str, secret_key: str, turn_secret: str) -> N
         "enable_registration": False,
         "report_stats": False,
         "turn": {
-            "uris": [f"turn:{domain}:3478"],
+            "uris": [
+                f"turn:{turn_domain}:3478",
+                f"turns:{turn_domain}:5349"
+            ],
             "secret": turn_secret,
             "ttl": 86400
         },
@@ -334,7 +345,7 @@ def create_conduwuit_config(domain: str, secret_key: str, turn_secret: str) -> N
     with open(data_dir / "conduwuit.yaml", "w") as f:
         yaml.dump(config, f, default_flow_style=False)
 
-def setup_conduwuit(domain: str, email: str, admin_user: str, admin_pass: str) -> None:
+def setup_conduwuit(domain: str, turn_domain: str, email: str, admin_user: str, admin_pass: str) -> None:
     """Setup Conduwuit"""
     install_dir = Path("/opt/conduwuit")
     install_dir.mkdir(parents=True, exist_ok=True)
@@ -349,18 +360,24 @@ def setup_conduwuit(domain: str, email: str, admin_user: str, admin_pass: str) -
     with open("coturn.conf", "w") as f:
         f.write(f"""use-auth-secret
 static-auth-secret={turn_secret}
-realm={domain}
+realm={turn_domain}
 # Security
-no-tcp
-no-tls
-no-dtls
+no-tcp-traffic
+no-multicast-peers
+# TLS support
+cert=/certs/fullchain.pem
+pkey=/certs/privkey.pem
 # Ports
+listening-port=3478
+tls-listening-port=5349
 min-port=49152
 max-port=49252
 # Logging
 verbose
 # Other
 stale-nonce=0
+# External IP (will be auto-detected)
+external-ip=auto
 """)
     
     # Create docker-compose.yml
@@ -391,15 +408,23 @@ stale-nonce=0
     network_mode: host
     volumes:
       - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+      - ./certs:/certs:ro
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/udp"
+      - "5349:5349/tcp"
+      - "49152-49252:49152-49252/udp"
     depends_on:
       - conduwuit
 """)
     
     # Create Conduwuit config
-    create_conduwuit_config(domain, secret_key, turn_secret)
+    create_conduwuit_config(domain, turn_domain, secret_key, turn_secret)
     
-    # Get SSL certificate
+    # Get SSL certificates for both domains
     get_ssl_certificate(domain, email)
+    get_ssl_certificate(turn_domain, email)
     
     # Copy SSL certificates
     print_debug("Copying SSL certificates...")
@@ -483,19 +508,22 @@ def main():
         install_docker()
         install_docker_compose()
         
-        domain, email, admin_user, admin_pass = get_user_input()
-        secret_key, turn_secret = setup_conduwuit(domain, email, admin_user, admin_pass)
+        domain, turn_domain, email, admin_user, admin_pass = get_user_input()
+        secret_key, turn_secret = setup_conduwuit(domain, turn_domain, email, admin_user, admin_pass)
         
         # Print success message
         print_message("\nInstallation complete!")
         print_message(f"Your Conduwuit instance is now running at https://{domain}")
-        print_message(f"TURN server is configured at turn:{domain}:3478")
+        print_message(f"TURN server is configured at:")
+        print_message(f"- turn:{turn_domain}:3478 (UDP/TCP)")
+        print_message(f"- turns:{turn_domain}:5349 (TLS)")
         print_message(f"TURN secret: {turn_secret}")
         print("\nAdmin credentials:")
         print(f"Username: {admin_user}")
         print("Password: [HIDDEN]")
         
         print_warning("\nPlease save these credentials in a secure location!")
+        print_warning("Make sure both domains point to your server's IP address!")
         
         print("\nManagement commands:")
         print_message("- View logs: docker-compose logs -f")
