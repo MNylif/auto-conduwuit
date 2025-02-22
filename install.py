@@ -902,46 +902,92 @@ class TroubleshootingMenu:
         # First, check if containers are running
         returncode, stdout, stderr = run_command("docker-compose ps")
         if "Exit" in stdout or "Restarting" in stdout:
-            print_debug("Containers are not running properly, attempting restart...")
-            run_command("docker-compose down")
-            time.sleep(2)
-            run_command("docker-compose up -d")
-            time.sleep(10)  # Give more time for initial startup
+            print_debug("Containers are not running properly, attempting fixes...")
+            
+            # Check Docker system status
+            print_debug("Checking Docker system status...")
+            run_command("docker system prune -f")  # Clean up unused resources
+            
+            # Check container logs for specific issues
+            returncode, stdout, stderr = run_command("docker-compose logs conduwuit --tail=50")
+            logs = stdout.lower()
+            
+            if "error" in logs or "panic" in logs:
+                print_debug("Found errors in Conduwuit logs:")
+                print(stdout)
+                
+                # Try different fixes based on error patterns
+                if "permission denied" in logs:
+                    print_debug("Fixing permissions...")
+                    run_command("chmod -R 755 /opt/conduwuit/data")
+                    run_command("chown -R root:root /opt/conduwuit/data")
+                elif "connection refused" in logs:
+                    print_debug("Container networking issue, recreating network...")
+                    run_command("docker-compose down")
+                    run_command("docker network prune -f")
+                    run_command("docker-compose up -d")
+                elif "no such file or directory" in logs:
+                    print_debug("Recreating missing directories...")
+                    run_command("mkdir -p /opt/conduwuit/data")
+                    run_command("mkdir -p /opt/conduwuit/certs")
+                    run_command("chmod -R 755 /opt/conduwuit")
+                elif "image not found" in logs or "pull access denied" in logs:
+                    print_debug("Image issues detected, attempting to fix...")
+                    
+                    # Try alternative images
+                    alternative_images = [
+                        "ghcr.io/girlbossceo/conduwuit:latest",
+                        "ghcr.io/girlbossceo/conduwuit:stable",
+                        "ghcr.io/girlbossceo/conduwuit:v1.1.0",
+                        "conduwuit/conduwuit:latest"  # Fallback image
+                    ]
+                    
+                    for image in alternative_images:
+                        print_debug(f"Trying alternative image: {image}")
+                        
+                        # Update docker-compose.yml with new image
+                        with open("docker-compose.yml", "r") as f:
+                            compose_content = f.read()
+                        
+                        new_content = compose_content.replace(
+                            "ghcr.io/girlbossceo/conduwuit:latest",
+                            image
+                        )
+                        
+                        with open("docker-compose.yml", "w") as f:
+                            f.write(new_content)
+                        
+                        # Try pulling and starting with new image
+                        run_command("docker-compose pull conduwuit")
+                        run_command("docker-compose up -d")
+                        
+                        # Wait a bit and check if it's working
+                        time.sleep(10)
+                        returncode, stdout, stderr = run_command("docker-compose ps conduwuit")
+                        if "Up" in stdout and "healthy" in stdout.lower():
+                            print_message(f"Successfully switched to alternative image: {image}")
+                            return True
+                
+                # If specific fixes didn't work, try rebuilding container
+                print_debug("Attempting to rebuild container...")
+                run_command("docker-compose down")
+                run_command("docker-compose pull")
+                run_command("docker-compose up -d --force-recreate")
+                time.sleep(10)
             
             # Check container status again
             returncode, stdout, stderr = run_command("docker-compose ps")
             if "Exit" in stdout or "Restarting" in stdout:
-                print_warning("Containers still not running properly after restart")
+                print_warning("Containers still not running properly after fixes")
+                
+                # Show detailed diagnostics
+                print_debug("\nContainer Diagnostics:")
+                run_command("docker ps -a")
+                run_command("docker-compose logs")
+                run_command("docker system df")  # Check disk usage
+                run_command("docker info")  # Show Docker system info
+                
                 return False
-        
-        # Check container logs for specific issues
-        returncode, stdout, stderr = run_command("docker-compose logs conduwuit --tail=50")
-        logs = stdout.lower()
-        
-        if "error" in logs or "panic" in logs:
-            print_debug("Found errors in Conduwuit logs:")
-            print(stdout)
-            
-            # Check for specific error patterns and apply fixes
-            if "permission denied" in logs:
-                print_debug("Fixing permissions...")
-                run_command("chmod -R 755 /opt/conduwuit/data")
-                run_command("chown -R root:root /opt/conduwuit/data")
-            elif "connection refused" in logs:
-                print_debug("Container networking issue, recreating network...")
-                run_command("docker-compose down")
-                run_command("docker network prune -f")
-                run_command("docker-compose up -d")
-            elif "no such file or directory" in logs:
-                print_debug("Recreating missing directories...")
-                run_command("mkdir -p /opt/conduwuit/data")
-                run_command("mkdir -p /opt/conduwuit/certs")
-                run_command("chmod -R 755 /opt/conduwuit")
-            
-            # Restart after applying fixes
-            print_debug("Restarting services after fixes...")
-            run_command("docker-compose restart")
-            time.sleep(10)
         
         # Verify service is responding
         print_debug("Checking if service is responding...")
