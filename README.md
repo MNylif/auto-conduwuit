@@ -7,7 +7,7 @@ This is an automated installation script for setting up a Conduwuit server using
 To install Conduwuit, run this command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/your-username/auto-conduwuit/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/MNylif/auto-conduwuit/main/install.sh | sudo bash
 ```
 
 ## What the Script Does
@@ -62,4 +62,4 @@ After installation, your Conduwuit instance will be:
 
 For issues or questions, please visit:
 - [Conduwuit Documentation](https://conduwuit.puppyirl.gay/)
-- [GitHub Issues](https://github.com/your-username/auto-conduwuit/issues) 
+- [GitHub Issues](https://github.com/MNylif/auto-conduwuit/issues) 
