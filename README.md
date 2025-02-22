@@ -19,13 +19,15 @@ curl -fsSL https://raw.githubusercontent.com/MNylif/auto-conduwuit/main/install.
 5. Sets up Conduwuit with Docker
 6. Configures SSL certificates
 7. Creates admin account
+8. Installs and configures Coturn TURN server for voice/video calls
 
 ## Requirements
 
 - A VPS or server running Ubuntu/Debian
 - A domain name pointing to your server
 - Root/sudo access
-- Port 80 and 443 available
+- Port 80 and 443 available for HTTPS
+- Ports 3478 (TURN) and 49152-49252 (RTP) available for voice/video calls
 
 ## Interactive Prompts
 
@@ -42,6 +44,7 @@ After installation, your Conduwuit instance will be:
 
 - Running at `https://your-domain.com`
 - Configured with SSL
+- TURN server running at `turn:your-domain.com:3478`
 - Ready to use with your admin account
 
 ## Management Commands
@@ -56,6 +59,7 @@ After installation, your Conduwuit instance will be:
 - SSL certificates are automatically obtained and configured
 - Admin registration is disabled by default
 - Secure random signing key is generated
+- TURN server configured with authentication
 - All credentials are collected securely
 
 ## Support

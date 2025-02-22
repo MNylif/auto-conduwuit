@@ -107,6 +107,28 @@ done
 # Generate random secret key
 SECRET_KEY=$(openssl rand -hex 32)
 
+# Generate TURN secret
+TURN_SECRET=$(openssl rand -hex 32)
+
+# Create coturn.conf
+print_message "Creating Coturn configuration..."
+cat > /opt/conduwuit/coturn.conf << EOL
+use-auth-secret
+static-auth-secret=${TURN_SECRET}
+realm=${DOMAIN_NAME}
+# Security
+no-tcp
+no-tls
+no-dtls
+# Ports
+min-port=49152
+max-port=49252
+# Logging
+verbose
+# Other
+stale-nonce=0
+EOL
+
 # Create docker-compose.yml
 print_message "Creating Docker Compose configuration..."
 cat > docker-compose.yml << EOL
@@ -114,7 +136,7 @@ version: '3'
 
 services:
   conduwuit:
-    image: conduwuit/conduwuit:latest
+    image: ghcr.io/girlbossceo/conduwuit:latest
     restart: always
     ports:
       - "80:8000"
@@ -128,6 +150,18 @@ services:
       - CONDUWUIT_DATABASE_PATH=/data/conduwuit.db
       - CONDUWUIT_SIGNING_KEY=${SECRET_KEY}
       - CONDUWUIT_ENABLE_REGISTRATION=false
+      - CONDUWUIT_TURN_URI=turn:${DOMAIN_NAME}:3478
+      - CONDUWUIT_TURN_SECRET=${TURN_SECRET}
+      - CONDUWUIT_TURN_TTL=86400
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: always
+    network_mode: host
+    volumes:
+      - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+    depends_on:
+      - conduwuit
 EOL
 
 # Get SSL certificate
@@ -159,6 +193,9 @@ check_command "Admin user creation"
 print_message "Installation complete!"
 echo
 print_message "Your Conduwuit instance is now running at https://${DOMAIN_NAME}"
+echo
+print_message "TURN server is configured at turn:${DOMAIN_NAME}:3478"
+print_message "TURN secret: ${TURN_SECRET}"
 echo
 print_message "Admin credentials:"
 echo "Username: ${ADMIN_USERNAME}"
