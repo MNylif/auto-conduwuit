@@ -221,85 +221,94 @@ def install_docker() -> None:
         processes = ["unattended-upgr", "apt-get", "dpkg"]
         
         # Check for lock files
+        locks_found = []
         for lock_file in lock_files:
             if os.path.exists(lock_file):
-                print_warning(f"Package manager lock file found: {lock_file}")
-                return True
-                
+                locks_found.append(lock_file)
+        
         # Check for running processes
+        procs_found = []
         for proc in processes:
             returncode, stdout, stderr = run_command(f"pgrep {proc}")
             if returncode == 0:
-                print_warning(f"Package manager process running: {proc}")
-                return True
-        return False
+                procs_found.append(proc)
+        
+        return locks_found, procs_found
     
     # Wait for package manager to be available
-    max_wait_time = 300  # 5 minutes
-    check_interval = 5  # Check every 5 seconds
+    max_wait_time = 120  # Reduce max wait time to 2 minutes
+    check_interval = 5
     total_checks = max_wait_time // check_interval
     start_time = time.time()
-    consecutive_same_state = 0
-    last_state = None
+    auto_fix_threshold = 30  # Try auto-fixing after 30 seconds
     
     for i in range(total_checks):
         current_time = time.time() - start_time
-        current_state = check_package_locks()
+        locks_found, procs_found = check_package_locks()
         
-        # Print progress
+        # Print progress and status
         print_progress(i + 1, total_checks, 
                       prefix='Waiting for package manager:', 
                       suffix=f'Time elapsed: {int(current_time)}s')
         
-        if not current_state:
+        if not locks_found and not procs_found:
             print_message("\nPackage manager is now available")
             break
-            
-        # Check if state hasn't changed
-        if current_state == last_state:
-            consecutive_same_state += 1
-        else:
-            consecutive_same_state = 0
         
-        # If stuck in same state for too long, try to fix
-        if consecutive_same_state >= 6:  # 30 seconds in same state
-            print_warning("\nPackage manager appears to be stuck")
+        # Print current status
+        if locks_found:
+            print_warning(f"\nLock files detected: {', '.join(locks_found)}")
+        if procs_found:
+            print_warning(f"Running processes detected: {', '.join(procs_found)}")
+        
+        # Auto-fix after threshold
+        if current_time > auto_fix_threshold:
+            print_warning("\nPackage manager appears stuck - attempting automatic fix...")
             
-            # Try to fix the situation
-            if kill_stuck_process("unattended-upgr"):
-                time.sleep(2)
-            if kill_stuck_process("dpkg"):
-                time.sleep(2)
+            # Kill stuck processes
+            for proc in procs_found:
+                if kill_stuck_process(proc):
+                    time.sleep(1)
+            
+            # Remove lock files
             check_and_fix_locks()
             
-            # Ask user what to do
-            print_warning("\nOptions:")
+            # Wait a bit after fixing
+            time.sleep(2)
+            
+            # Check if fixed
+            locks_found, procs_found = check_package_locks()
+            if not locks_found and not procs_found:
+                print_message("Successfully fixed package manager locks")
+                break
+            
+            # If not fixed, ask user
+            print_warning("\nAutomatic fix incomplete. Options:")
             print("1. Continue waiting")
-            print("2. Try to force remove locks")
+            print("2. Try more aggressive fix (force remove locks)")
             print("3. Exit and try again later")
             
-            choice = input("Choose an option (1-3): ").strip()
+            choice = input("\nChoose an option (1-3): ").strip()
             if choice == "2":
-                check_and_fix_locks()
-                # Wait a bit after fixing locks
+                # More aggressive fix
+                run_command("killall -9 apt apt-get dpkg unattended-upgr", shell=True)
+                run_command("rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock")
+                run_command("dpkg --configure -a")
                 time.sleep(5)
             elif choice == "3":
                 print_error("Installation cancelled by user")
                 sys.exit(1)
-            
-            consecutive_same_state = 0
         
-        last_state = current_state
         time.sleep(check_interval)
-        
-    if check_package_locks():
+    
+    if check_package_locks()[0] or check_package_locks()[1]:
         print_error("\nTimeout waiting for package manager locks to be released")
-        print_error("Please try these steps:")
+        print_error("Please try these steps manually:")
         print_error("1. Wait a few minutes and try again")
         print_error("2. Run these commands to fix stuck locks:")
-        print_error("   sudo killall apt apt-get dpkg unattended-upgr")
-        print_error("   sudo rm /var/lib/dpkg/lock*")
-        print_error("   sudo rm /var/lib/apt/lists/lock")
+        print_error("   sudo killall -9 apt apt-get dpkg unattended-upgr")
+        print_error("   sudo rm -f /var/lib/dpkg/lock*")
+        print_error("   sudo rm -f /var/lib/apt/lists/lock")
         print_error("   sudo dpkg --configure -a")
         sys.exit(1)
     
