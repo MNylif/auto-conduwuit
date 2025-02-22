@@ -318,14 +318,13 @@ def create_conduwuit_config(domain: str, turn_domain: str, secret_key: str, turn
     """Create Conduwuit configuration file"""
     print_debug("Creating Conduwuit configuration...")
     
-    config = f"""# Server configuration
+    config = f"""[global]
 server_name = "{domain}"
 database_path = "/data/conduwuit.db"
 signing_key = "{secret_key}"
 enable_registration = false
 report_stats = false
 
-# TURN configuration
 [turn]
 uris = [
     "turn:{turn_domain}:3478",
@@ -334,7 +333,6 @@ uris = [
 secret = "{turn_secret}"
 ttl = 86400
 
-# TLS configuration
 [tls]
 certs = "/certs/fullchain.pem"
 key = "/certs/privkey.pem"
@@ -343,7 +341,8 @@ key = "/certs/privkey.pem"
     data_dir = Path("/opt/conduwuit/data")
     data_dir.mkdir(parents=True, exist_ok=True)
     
-    with open(data_dir / "conduwuit.yaml", "w") as f:
+    # Save with .toml extension instead of .yaml
+    with open(data_dir / "conduwuit.toml", "w") as f:
         f.write(config)
 
 def setup_conduwuit(domain: str, turn_domain: str, email: str, admin_user: str, admin_pass: str) -> None:
@@ -395,7 +394,7 @@ external-ip=auto
       - ./data:/data
       - ./certs:/certs
     environment:
-      - CONDUWUIT_CONFIG=/data/conduwuit.yaml
+      - CONDUWUIT_CONFIG=/data/conduwuit.toml
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/_matrix/client/versions"]
       interval: 10s
@@ -477,7 +476,7 @@ external-ip=auto
     print_message("Creating admin user...")
     max_retries = 3
     for i in range(max_retries):
-        cmd = f"docker-compose exec -T conduwuit register_new_matrix_user -c /data/conduwuit.yaml -u {admin_user} -p {admin_pass} -a"
+        cmd = f"docker-compose exec -T conduwuit register_new_matrix_user -c /data/conduwuit.toml -u {admin_user} -p {admin_pass} -a"
         returncode, stdout, stderr = run_command(cmd)
         if returncode == 0:
             break
