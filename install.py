@@ -87,6 +87,22 @@ def check_ports() -> None:
 def install_packages() -> None:
     """Install required packages"""
     print_message("Installing required packages...")
+    
+    # Add certbot repository
+    print_debug("Adding Certbot repository...")
+    run_command("apt-get install -y software-properties-common")
+    run_command("add-apt-repository -y universe")
+    run_command("add-apt-repository -y ppa:certbot/certbot")
+    
+    # Update package list
+    print_debug("Updating package lists...")
+    cmd = "apt-get update"
+    returncode, stdout, stderr = run_command(cmd)
+    if returncode != 0:
+        print_error(f"Failed to update package list: {stderr}")
+        sys.exit(1)
+
+    # Install basic packages
     packages = [
         'apt-transport-https',
         'ca-certificates',
@@ -94,40 +110,52 @@ def install_packages() -> None:
         'gnupg',
         'lsb-release',
         'software-properties-common',
-        'net-tools',
-        'certbot'
+        'net-tools'
     ]
     
-    # Update package list
-    cmd = f"apt-get update"
-    returncode, stdout, stderr = run_command(cmd)
-    if returncode != 0:
-        print_error(f"Failed to update package list: {stderr}")
-        sys.exit(1)
-
-    # Install packages
+    print_debug("Installing basic packages...")
     cmd = f"apt-get install -y {' '.join(packages)}"
     returncode, stdout, stderr = run_command(cmd)
     if returncode != 0:
         print_error(f"Failed to install packages: {stderr}")
         sys.exit(1)
 
+    # Try installing certbot via apt
+    print_debug("Attempting to install Certbot via apt...")
+    returncode, stdout, stderr = run_command("apt-get install -y certbot")
+    
     # Verify certbot installation
     print_debug("Verifying certbot installation...")
     returncode, stdout, stderr = run_command("which certbot")
     if returncode != 0:
-        print_debug("Installing certbot via snap as fallback...")
+        print_debug("Certbot not found, installing via snap...")
+        
+        # Install snap if not present
+        print_debug("Installing snap...")
         run_command("apt-get install -y snapd")
         run_command("snap install core")
         run_command("snap refresh core")
+        
+        # Remove any existing certbot installation
+        print_debug("Removing any existing certbot installations...")
+        run_command("apt-get remove -y certbot")
+        run_command("rm -f /usr/bin/certbot")
+        
+        # Install certbot via snap
+        print_debug("Installing Certbot via snap...")
         run_command("snap install --classic certbot")
         run_command("ln -sf /snap/bin/certbot /usr/bin/certbot")
         
-        # Verify again
+        # Final verification
         returncode, stdout, stderr = run_command("which certbot")
         if returncode != 0:
             print_error("Failed to install certbot")
+            print_error("Please try installing certbot manually:")
+            print_error("sudo snap install --classic certbot")
+            print_error("sudo ln -s /snap/bin/certbot /usr/bin/certbot")
             sys.exit(1)
+    
+    print_debug("Certbot installation verified successfully")
 
 def install_docker() -> None:
     """Install Docker"""
@@ -207,6 +235,67 @@ def get_user_input() -> Tuple[str, str, str, str]:
     
     return domain, email, admin_user, admin_pass
 
+def get_ssl_certificate(domain: str, email: str) -> None:
+    """Get SSL certificate from Let's Encrypt"""
+    print_message("Obtaining SSL certificate...")
+    
+    # Stop any services using port 80
+    print_debug("Stopping any services using port 80...")
+    services_to_stop = ['apache2', 'nginx', 'httpd']
+    for service in services_to_stop:
+        run_command(f"systemctl stop {service}", shell=True)
+    
+    # Verify port 80 is available
+    print_debug("Verifying port 80 is available...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    result = sock.connect_ex(('127.0.0.1', 80))
+    sock.close()
+    if result == 0:
+        print_error("Port 80 is still in use. Please free it before continuing.")
+        sys.exit(1)
+    
+    # Try to get SSL certificate
+    max_retries = 3
+    for i in range(max_retries):
+        print_debug(f"Attempting to obtain SSL certificate (attempt {i+1}/{max_retries})...")
+        
+        # Verify certbot is available
+        returncode, stdout, stderr = run_command("which certbot")
+        if returncode != 0:
+            print_error("Certbot not found. Please ensure it's installed correctly.")
+            sys.exit(1)
+        
+        # Run certbot
+        cmd = f"certbot certonly --standalone --preferred-challenges http -d {domain} --email {email} --agree-tos -n"
+        returncode, stdout, stderr = run_command(cmd)
+        
+        if returncode == 0:
+            print_debug("SSL certificate obtained successfully")
+            break
+        
+        if i < max_retries - 1:
+            print_warning(f"Failed to obtain SSL certificate: {stderr}")
+            print_debug("Retrying in 5 seconds...")
+            time.sleep(5)
+        else:
+            print_error(f"Failed to obtain SSL certificate after {max_retries} attempts")
+            print_error(f"Error: {stderr}")
+            print_error("Please ensure:")
+            print_error("1. Your domain points to this server")
+            print_error("2. Port 80 is available")
+            print_error("3. You have a valid email address")
+            sys.exit(1)
+    
+    # Verify certificate files exist
+    cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
+    key_path = f"/etc/letsencrypt/live/{domain}/privkey.pem"
+    
+    if not os.path.exists(cert_path) or not os.path.exists(key_path):
+        print_error("SSL certificate files not found after successful generation")
+        sys.exit(1)
+    
+    print_debug("SSL certificate files verified")
+
 def setup_conduwuit(domain: str, email: str, admin_user: str, admin_pass: str) -> None:
     """Setup Conduwuit"""
     install_dir = Path("/opt/conduwuit")
@@ -272,29 +361,7 @@ services:
 """)
     
     # Get SSL certificate
-    print_message("Obtaining SSL certificate...")
-    
-    # Stop any services using port 80
-    print_debug("Stopping any services using port 80...")
-    run_command("systemctl stop apache2", shell=True)  # Common web server
-    run_command("systemctl stop nginx", shell=True)    # Common web server
-    
-    # Try to get SSL certificate
-    max_retries = 3
-    for i in range(max_retries):
-        print_debug(f"Attempting to obtain SSL certificate (attempt {i+1}/{max_retries})...")
-        cmd = f"certbot certonly --standalone --preferred-challenges http -d {domain} --email {email} --agree-tos -n"
-        returncode, stdout, stderr = run_command(cmd)
-        if returncode == 0:
-            break
-        if i < max_retries - 1:
-            print_warning(f"Failed to obtain SSL certificate: {stderr}")
-            print_debug("Retrying in 5 seconds...")
-            time.sleep(5)
-        else:
-            print_error(f"Failed to obtain SSL certificate after {max_retries} attempts")
-            print_error(f"Error: {stderr}")
-            sys.exit(1)
+    get_ssl_certificate(domain, email)
     
     # Copy SSL certificates
     print_debug("Copying SSL certificates...")
