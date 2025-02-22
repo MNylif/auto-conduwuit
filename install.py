@@ -173,16 +173,67 @@ def install_docker() -> None:
     """Install Docker"""
     print_message("Installing Docker...")
     
+    # Wait for any package manager locks
+    def check_package_locks():
+        lock_files = [
+            "/var/lib/dpkg/lock-frontend",
+            "/var/lib/apt/lists/lock",
+            "/var/lib/dpkg/lock"
+        ]
+        processes = ["unattended-upgr", "apt-get", "dpkg"]
+        
+        # Check for lock files
+        for lock_file in lock_files:
+            if os.path.exists(lock_file):
+                print_warning(f"Package manager lock file found: {lock_file}")
+                return True
+                
+        # Check for running processes
+        for proc in processes:
+            returncode, stdout, stderr = run_command(f"pgrep {proc}")
+            if returncode == 0:
+                print_warning(f"Package manager process running: {proc}")
+                return True
+        return False
+    
+    # Wait for package manager to be available
+    max_wait_time = 300  # 5 minutes
+    start_time = time.time()
+    while check_package_locks():
+        if time.time() - start_time > max_wait_time:
+            print_error("Timeout waiting for package manager locks to be released")
+            print_error("Please try again later or run these commands manually:")
+            print_error("1. sudo apt-get update")
+            print_error("2. curl -fsSL https://get.docker.com | sudo sh")
+            sys.exit(1)
+        print_debug("Waiting for package manager to be available (this may take a few minutes)...")
+        time.sleep(10)
+    
     # Download Docker install script
     print_debug("Downloading Docker install script...")
-    urllib.request.urlretrieve("https://get.docker.com", "get-docker.sh")
-    
-    # Install Docker
-    print_debug("Installing Docker...")
-    returncode, stdout, stderr = run_command("sh get-docker.sh")
-    if returncode != 0:
-        print_error(f"Docker installation failed: {stderr}")
+    try:
+        urllib.request.urlretrieve("https://get.docker.com", "get-docker.sh")
+    except Exception as e:
+        print_error(f"Failed to download Docker install script: {str(e)}")
         sys.exit(1)
+    
+    # Install Docker with retry logic
+    print_debug("Installing Docker...")
+    max_retries = 3
+    for i in range(max_retries):
+        returncode, stdout, stderr = run_command("sh get-docker.sh")
+        if returncode == 0:
+            break
+        if i < max_retries - 1:
+            print_warning(f"Docker installation attempt {i+1}/{max_retries} failed. Retrying in 10 seconds...")
+            print_debug(f"Error: {stderr}")
+            time.sleep(10)
+        else:
+            print_error("Docker installation failed after multiple attempts")
+            print_error(f"Error: {stderr}")
+            print_error("Please try installing Docker manually:")
+            print_error("curl -fsSL https://get.docker.com | sudo sh")
+            sys.exit(1)
     
     # Start Docker service
     print_debug("Starting Docker service...")
@@ -194,6 +245,12 @@ def install_docker() -> None:
     if returncode != 0:
         print_error("Docker service is not running")
         sys.exit(1)
+    
+    # Clean up install script
+    try:
+        os.remove("get-docker.sh")
+    except:
+        pass
 
 def install_docker_compose() -> None:
     """Install Docker Compose"""
