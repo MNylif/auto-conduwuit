@@ -600,13 +600,13 @@ stale-nonce=0
 external-ip=auto
 """)
     
-    # Create docker-compose.yml
+    # Create docker-compose.yml with improved configuration
     print_message("Creating Docker Compose configuration...")
     with open("docker-compose.yml", "w") as f:
         f.write(f"""version: '3.8'
 services:
   conduwuit:
-    image: ghcr.io/girlbossceo/conduwuit:latest
+    image: ghcr.io/girlbossceo/conduwuit:v1.1.0
     restart: unless-stopped
     ports:
       - "80:8000"
@@ -616,7 +616,7 @@ services:
       - ./certs:/certs
     environment:
       - CONDUWUIT_CONFIG=/data/conduwuit.toml
-      - RUST_LOG=info
+      - RUST_LOG=info,conduwuit=debug
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/_matrix/client/versions"]
       interval: 10s
@@ -630,7 +630,7 @@ services:
         max-file: "3"
 
   coturn:
-    image: coturn/coturn:latest
+    image: coturn/coturn:4.6.2
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -670,47 +670,153 @@ services:
         print_error(f"Failed to copy SSL certificates: {str(e)}")
         sys.exit(1)
     
-    # Start services
+    # Start services with improved error handling
     print_message("Starting services...")
     
-    # Pull images first
+    # Define alternative images to try
+    conduwuit_images = [
+        "ghcr.io/girlbossceo/conduwuit:v1.1.0",  # Try specific version first
+        "ghcr.io/girlbossceo/conduwuit:latest",  # Then latest
+        "ghcr.io/girlbossceo/conduwuit:stable",  # Then stable
+        "conduwuit/conduwuit:latest"             # Fallback to alternative repo
+    ]
+    
+    coturn_images = [
+        "coturn/coturn:4.6.2",    # Try specific version first
+        "coturn/coturn:latest",   # Then latest
+        "coturn/coturn:alpine"    # Then alpine version
+    ]
+    
+    def try_pull_image(image: str) -> bool:
+        """Try to pull a Docker image"""
+        print_debug(f"Attempting to pull image: {image}")
+        returncode, stdout, stderr = run_command(f"docker pull {image}")
+        return returncode == 0
+    
+    def update_compose_image(service: str, image: str):
+        """Update image in docker-compose.yml"""
+        with open("docker-compose.yml", "r") as f:
+            content = f.read()
+        
+        # Create pattern based on service
+        if service == "conduwuit":
+            old_pattern = r'image: ghcr.io/girlbossceo/conduwuit:[^\n]+'
+        else:
+            old_pattern = r'image: coturn/coturn:[^\n]+'
+        
+        import re
+        new_content = re.sub(old_pattern, f'image: {image}', content)
+        
+        with open("docker-compose.yml", "w") as f:
+            f.write(new_content)
+    
+    # Try pulling images with fallbacks
     print_debug("Pulling Docker images...")
-    returncode, stdout, stderr = run_command("docker-compose pull")
-    if returncode != 0:
-        print_error("Failed to pull Docker images")
-        print_error(f"Error: {stderr}")
+    
+    # Try Conduwuit images
+    conduwuit_success = False
+    for image in conduwuit_images:
+        if try_pull_image(image):
+            print_message(f"Successfully pulled Conduwuit image: {image}")
+            update_compose_image("conduwuit", image)
+            conduwuit_success = True
+            break
+        else:
+            print_warning(f"Failed to pull Conduwuit image: {image}")
+    
+    if not conduwuit_success:
+        print_error("Failed to pull any Conduwuit image")
+        print_error("Please check your internet connection and Docker registry access")
+        sys.exit(1)
+    
+    # Try Coturn images
+    coturn_success = False
+    for image in coturn_images:
+        if try_pull_image(image):
+            print_message(f"Successfully pulled Coturn image: {image}")
+            update_compose_image("coturn", image)
+            coturn_success = True
+            break
+        else:
+            print_warning(f"Failed to pull Coturn image: {image}")
+    
+    if not coturn_success:
+        print_error("Failed to pull any Coturn image")
+        print_error("Please check your internet connection and Docker registry access")
         sys.exit(1)
     
     # Stop any existing containers
     print_debug("Stopping any existing containers...")
     run_command("docker-compose down")
     
+    # Start services with improved error handling
+    print_debug("Starting services...")
+    returncode, stdout, stderr = run_command("docker-compose up -d")
+    if returncode != 0:
+        print_error("Failed to start services")
+        print_error(f"Error: {stderr}")
+        print_debug("Attempting to fix common issues...")
+        
+        # Check for common issues
+        if "port is already allocated" in stderr:
+            print_warning("Port conflict detected. Checking for conflicting services...")
+            for port in [80, 443, 3478, 5349]:
+                run_command(f"lsof -i :{port}")
+        elif "no space left on device" in stderr:
+            print_warning("Disk space issue detected. Cleaning up Docker system...")
+            run_command("docker system prune -f")
+        elif "permission denied" in stderr:
+            print_warning("Permission issue detected. Fixing directory permissions...")
+            run_command("chmod -R 755 /opt/conduwuit")
+            run_command("chown -R root:root /opt/conduwuit")
+    
     # Wait for services with improved health checking
     print_debug("Waiting for services to be ready...")
-    max_wait_time = 180  # Increase timeout to 3 minutes
+    max_wait_time = 180  # 3 minutes timeout
     check_interval = 5
     start_time = time.time()
     
     def check_services():
-        """Check if services are running and healthy"""
-        # First check if containers are running
+        """Check if services are running and healthy with detailed diagnostics"""
+        # Check if containers are running
         returncode, stdout, stderr = run_command("docker-compose ps -a")
         if "Exit" in stdout or "Restarting" in stdout:
             print_warning("Containers are not running properly:")
             print(stdout)
+            
+            # Get detailed container status
+            returncode, stdout, stderr = run_command("docker ps -a")
+            print_debug("Detailed container status:")
+            print(stdout)
+            
+            # Check container logs
+            returncode, stdout, stderr = run_command("docker-compose logs --tail=50")
+            print_debug("Recent container logs:")
+            print(stdout)
+            
             return False
         
         # Check Conduwuit container specifically
         returncode, stdout, stderr = run_command("docker-compose ps conduwuit")
         if "Up" not in stdout or "healthy" not in stdout.lower():
-            print_warning("Conduwuit container is not healthy:")
-            print(stdout)
+            print_warning("Conduwuit container is not healthy")
             
-            # Check logs for specific issues
+            # Get Conduwuit logs
             returncode, logs, stderr = run_command("docker-compose logs conduwuit --tail=50")
             if logs:
                 print_debug("Conduwuit logs:")
                 print(logs)
+                
+                # Check for specific error patterns
+                if "error" in logs.lower():
+                    print_warning("Found errors in Conduwuit logs")
+                    if "database" in logs.lower():
+                        print_debug("Database issue detected, attempting to fix...")
+                        run_command("docker-compose restart conduwuit")
+                    elif "config" in logs.lower():
+                        print_debug("Configuration issue detected")
+                        print_debug("Please check your configuration file for errors")
+            
             return False
         
         # Try to access the health endpoint
@@ -722,7 +828,6 @@ services:
         return True
     
     while time.time() - start_time < max_wait_time:
-        # Print progress
         elapsed = int(time.time() - start_time)
         remaining = max_wait_time - elapsed
         print_progress(elapsed, max_wait_time, 
@@ -733,15 +838,33 @@ services:
             print_message("\nServices are healthy and responding")
             break
         
-        # If we've waited more than half the timeout, show detailed status
+        # Show detailed status and troubleshooting options after half timeout
         if elapsed > max_wait_time // 2:
             print_debug("\nDetailed service status:")
             run_command("docker-compose ps")
             run_command("docker-compose logs --tail=20")
             
-            # Show troubleshooting menu
-            if not troubleshoot.show_menu("service health check", "docker-compose logs"):
-                return False
+            print_warning("\nServices taking longer than expected to start")
+            print("Troubleshooting options:")
+            print("1. Continue waiting")
+            print("2. View detailed logs")
+            print("3. Attempt automatic fix")
+            print("4. Cancel installation")
+            
+            choice = input("\nChoose an option (1-4): ").strip()
+            
+            if choice == "2":
+                print_debug("\nFull container logs:")
+                run_command("docker-compose logs")
+                input("\nPress Enter to continue...")
+            elif choice == "3":
+                print_debug("Attempting automatic fix...")
+                run_command("docker-compose down")
+                run_command("docker system prune -f")
+                run_command("docker-compose up -d")
+            elif choice == "4":
+                print_error("Installation cancelled by user")
+                sys.exit(1)
         
         time.sleep(check_interval)
     else:
@@ -801,23 +924,29 @@ class TroubleshootingMenu:
         print_warning(f"\nOperation taking longer than expected: {context}")
         print("\nTroubleshooting Options:")
         print("1. Continue waiting")
-        print("2. View logs/diagnostics")
-        print("3. Attempt automatic fix")
-        print("4. Cancel installation")
+        print("2. View detailed diagnostics")
+        print("3. Try automatic fixes")
+        print("4. Manual intervention")
+        print("5. Cancel installation")
         
         while True:
-            choice = input("\nChoose an option (1-4): ").strip()
+            choice = input("\nChoose an option (1-5): ").strip()
             
             if choice == "1":
                 return True
             elif choice == "2":
                 self._show_diagnostics(context, logs_cmd)
-                return self.show_menu(context, logs_cmd)  # Show menu again after viewing logs
+                return self.show_menu(context, logs_cmd)
             elif choice == "3":
                 if self._attempt_fix(context):
+                    print_message("Automatic fix was successful")
                     return True
-                return self.show_menu(context, logs_cmd)  # Show menu again if fix wasn't successful
+                print_warning("Automatic fix was not successful")
+                return self.show_menu(context, logs_cmd)
             elif choice == "4":
+                self._show_manual_intervention()
+                return self.show_menu(context, logs_cmd)
+            elif choice == "5":
                 if input("Are you sure you want to cancel? (y/N): ").lower() == 'y':
                     print_error("Installation cancelled by user")
                     sys.exit(1)
@@ -828,15 +957,54 @@ class TroubleshootingMenu:
         """Show relevant logs and diagnostics"""
         print_debug("\nGathering diagnostic information...")
         
+        # Show container status
+        print_debug("\nContainer Status:")
+        run_command("docker-compose ps")
+        
+        # Show container logs
         if logs_cmd:
-            print_debug(f"Logs for {context}:")
+            print_debug(f"\nContainer Logs:")
             returncode, stdout, stderr = run_command(logs_cmd)
             print(stdout)
         
-        print_debug("\nSystem Status:")
+        # Show system resources
+        print_debug("\nSystem Resources:")
         run_command("free -h")  # Memory usage
         run_command("df -h")    # Disk usage
-        run_command("top -b -n 1 | head -n 20")  # Process status
+        
+        # Show Docker system info
+        print_debug("\nDocker System Information:")
+        run_command("docker system df")  # Docker disk usage
+        run_command("docker info")       # Docker system info
+        
+        # Show network status
+        print_debug("\nNetwork Status:")
+        run_command("netstat -tulpn | grep -E ':(80|443|3478|5349)'")
+        
+        input("\nPress Enter to continue...")
+    
+    def _show_manual_intervention(self):
+        """Show manual intervention options"""
+        print_debug("\nManual Intervention Options:")
+        print("\n1. View and edit configuration:")
+        print("   - Check /opt/conduwuit/data/conduwuit.toml")
+        print("   - Check /opt/conduwuit/coturn.conf")
+        print("   - Check /opt/conduwuit/docker-compose.yml")
+        
+        print("\n2. Common commands:")
+        print("   - View logs: docker-compose logs")
+        print("   - Restart services: docker-compose restart")
+        print("   - Rebuild containers: docker-compose up -d --force-recreate")
+        print("   - Clean Docker system: docker system prune")
+        
+        print("\n3. Check ports:")
+        print("   - Required ports: 80, 443 (Matrix server)")
+        print("   - TURN ports: 3478, 5349, 49152-49252")
+        print("   - Command: netstat -tulpn")
+        
+        print("\n4. Check SSL certificates:")
+        print("   - Location: /opt/conduwuit/certs/")
+        print("   - Verify with: certbot certificates")
         
         input("\nPress Enter to continue...")
     
@@ -853,8 +1021,24 @@ class TroubleshootingMenu:
         elif "conduwuit" in context.lower():
             return self._fix_conduwuit()
         
-        print_warning("No automatic fix available for this issue")
-        return False
+        # Try general fixes
+        print_debug("Attempting general fixes...")
+        
+        # Fix permissions
+        run_command("chmod -R 755 /opt/conduwuit")
+        run_command("chown -R root:root /opt/conduwuit")
+        
+        # Clean Docker system
+        run_command("docker system prune -f")
+        
+        # Restart services
+        run_command("docker-compose down")
+        run_command("docker-compose up -d --force-recreate")
+        
+        # Wait a bit and check if it worked
+        time.sleep(10)
+        returncode, stdout, stderr = run_command("docker-compose ps")
+        return "Exit" not in stdout and "Restarting" not in stdout
     
     def _fix_package_manager(self) -> bool:
         """Fix common package manager issues"""
@@ -877,21 +1061,35 @@ class TroubleshootingMenu:
         """Fix common Docker issues"""
         print_debug("Attempting to fix Docker...")
         
+        # Restart Docker daemon
         run_command("systemctl restart docker")
         time.sleep(2)
         
+        # Verify Docker is running
         returncode, stdout, stderr = run_command("systemctl is-active docker")
-        return returncode == 0
+        if returncode != 0:
+            return False
+        
+        # Clean up Docker system
+        run_command("docker system prune -f")
+        
+        # Recreate containers
+        run_command("docker-compose down")
+        run_command("docker-compose up -d --force-recreate")
+        
+        return True
     
     def _fix_certbot(self) -> bool:
         """Fix common Certbot issues"""
         print_debug("Attempting to fix Certbot...")
         
+        # Reinstall Certbot
         run_command("snap remove certbot")
         time.sleep(2)
         run_command("snap install --classic certbot")
         run_command("ln -sf /snap/bin/certbot /usr/bin/certbot")
         
+        # Verify installation
         returncode, stdout, stderr = run_command("which certbot")
         return returncode == 0
     
@@ -899,107 +1097,58 @@ class TroubleshootingMenu:
         """Fix common Conduwuit issues"""
         print_debug("Attempting to fix Conduwuit...")
         
-        # First, check if containers are running
+        # Check container status
         returncode, stdout, stderr = run_command("docker-compose ps")
         if "Exit" in stdout or "Restarting" in stdout:
             print_debug("Containers are not running properly, attempting fixes...")
             
-            # Check Docker system status
-            print_debug("Checking Docker system status...")
-            run_command("docker system prune -f")  # Clean up unused resources
+            # Clean up Docker system
+            print_debug("Cleaning up Docker system...")
+            run_command("docker system prune -f")
             
-            # Check container logs for specific issues
+            # Check logs for specific issues
             returncode, stdout, stderr = run_command("docker-compose logs conduwuit --tail=50")
             logs = stdout.lower()
             
             if "error" in logs or "panic" in logs:
-                print_debug("Found errors in Conduwuit logs:")
+                print_debug("Found errors in logs:")
                 print(stdout)
                 
-                # Try different fixes based on error patterns
+                # Try fixes based on error patterns
                 if "permission denied" in logs:
                     print_debug("Fixing permissions...")
                     run_command("chmod -R 755 /opt/conduwuit/data")
                     run_command("chown -R root:root /opt/conduwuit/data")
                 elif "connection refused" in logs:
-                    print_debug("Container networking issue, recreating network...")
+                    print_debug("Network issue detected, recreating network...")
                     run_command("docker-compose down")
                     run_command("docker network prune -f")
                     run_command("docker-compose up -d")
                 elif "no such file or directory" in logs:
-                    print_debug("Recreating missing directories...")
+                    print_debug("Creating missing directories...")
                     run_command("mkdir -p /opt/conduwuit/data")
                     run_command("mkdir -p /opt/conduwuit/certs")
                     run_command("chmod -R 755 /opt/conduwuit")
-                elif "image not found" in logs or "pull access denied" in logs:
-                    print_debug("Image issues detected, attempting to fix...")
-                    
-                    # Try alternative images
-                    alternative_images = [
-                        "ghcr.io/girlbossceo/conduwuit:latest",
-                        "ghcr.io/girlbossceo/conduwuit:stable",
-                        "ghcr.io/girlbossceo/conduwuit:v1.1.0",
-                        "conduwuit/conduwuit:latest"  # Fallback image
-                    ]
-                    
-                    for image in alternative_images:
-                        print_debug(f"Trying alternative image: {image}")
-                        
-                        # Update docker-compose.yml with new image
-                        with open("docker-compose.yml", "r") as f:
-                            compose_content = f.read()
-                        
-                        new_content = compose_content.replace(
-                            "ghcr.io/girlbossceo/conduwuit:latest",
-                            image
-                        )
-                        
-                        with open("docker-compose.yml", "w") as f:
-                            f.write(new_content)
-                        
-                        # Try pulling and starting with new image
-                        run_command("docker-compose pull conduwuit")
-                        run_command("docker-compose up -d")
-                        
-                        # Wait a bit and check if it's working
-                        time.sleep(10)
-                        returncode, stdout, stderr = run_command("docker-compose ps conduwuit")
-                        if "Up" in stdout and "healthy" in stdout.lower():
-                            print_message(f"Successfully switched to alternative image: {image}")
-                            return True
-                
-                # If specific fixes didn't work, try rebuilding container
-                print_debug("Attempting to rebuild container...")
-                run_command("docker-compose down")
-                run_command("docker-compose pull")
-                run_command("docker-compose up -d --force-recreate")
-                time.sleep(10)
+                elif "config" in logs:
+                    print_debug("Configuration issue detected...")
+                    print_debug("Please check your configuration files for errors")
             
-            # Check container status again
+            # Recreate containers
+            print_debug("Recreating containers...")
+            run_command("docker-compose down")
+            run_command("docker-compose up -d --force-recreate")
+            
+            # Wait and check status
+            time.sleep(10)
             returncode, stdout, stderr = run_command("docker-compose ps")
             if "Exit" in stdout or "Restarting" in stdout:
                 print_warning("Containers still not running properly after fixes")
-                
-                # Show detailed diagnostics
-                print_debug("\nContainer Diagnostics:")
-                run_command("docker ps -a")
-                run_command("docker-compose logs")
-                run_command("docker system df")  # Check disk usage
-                run_command("docker info")  # Show Docker system info
-                
                 return False
         
         # Verify service is responding
         print_debug("Checking if service is responding...")
-        max_retries = 3
-        for i in range(max_retries):
-            returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
-            if returncode == 0 and stdout.strip() == "200":
-                print_message("Service is now responding")
-                return True
-            time.sleep(5)
-        
-        return False
+        returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
+        return returncode == 0 and stdout.strip() == "200"
 
 # Initialize global progress tracker and troubleshooting menu
 progress = InstallationProgress()
