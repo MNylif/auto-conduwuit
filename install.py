@@ -88,12 +88,6 @@ def install_packages() -> None:
     """Install required packages"""
     print_message("Installing required packages...")
     
-    # Add certbot repository
-    print_debug("Adding Certbot repository...")
-    run_command("apt-get install -y software-properties-common")
-    run_command("add-apt-repository -y universe")
-    run_command("add-apt-repository -y ppa:certbot/certbot")
-    
     # Update package list
     print_debug("Updating package lists...")
     cmd = "apt-get update"
@@ -110,7 +104,8 @@ def install_packages() -> None:
         'gnupg',
         'lsb-release',
         'software-properties-common',
-        'net-tools'
+        'net-tools',
+        'snapd'
     ]
     
     print_debug("Installing basic packages...")
@@ -120,40 +115,39 @@ def install_packages() -> None:
         print_error(f"Failed to install packages: {stderr}")
         sys.exit(1)
 
-    # Try installing certbot via apt
-    print_debug("Attempting to install Certbot via apt...")
-    returncode, stdout, stderr = run_command("apt-get install -y certbot")
+    # Install certbot via snap
+    print_debug("Installing Certbot via snap...")
     
-    # Verify certbot installation
-    print_debug("Verifying certbot installation...")
+    # Ensure snap is ready
+    print_debug("Preparing snap...")
+    run_command("snap install core")
+    run_command("snap refresh core")
+    
+    # Remove any existing certbot installation
+    print_debug("Removing any existing certbot installations...")
+    run_command("apt-get remove -y certbot", shell=True)
+    run_command("rm -f /usr/bin/certbot")
+    
+    # Install certbot via snap
+    print_debug("Installing Certbot...")
+    returncode, stdout, stderr = run_command("snap install --classic certbot")
+    if returncode != 0:
+        print_error(f"Failed to install Certbot via snap: {stderr}")
+        sys.exit(1)
+    
+    # Create symlink
+    print_debug("Creating Certbot symlink...")
+    run_command("ln -sf /snap/bin/certbot /usr/bin/certbot")
+    
+    # Final verification
+    print_debug("Verifying Certbot installation...")
     returncode, stdout, stderr = run_command("which certbot")
     if returncode != 0:
-        print_debug("Certbot not found, installing via snap...")
-        
-        # Install snap if not present
-        print_debug("Installing snap...")
-        run_command("apt-get install -y snapd")
-        run_command("snap install core")
-        run_command("snap refresh core")
-        
-        # Remove any existing certbot installation
-        print_debug("Removing any existing certbot installations...")
-        run_command("apt-get remove -y certbot")
-        run_command("rm -f /usr/bin/certbot")
-        
-        # Install certbot via snap
-        print_debug("Installing Certbot via snap...")
-        run_command("snap install --classic certbot")
-        run_command("ln -sf /snap/bin/certbot /usr/bin/certbot")
-        
-        # Final verification
-        returncode, stdout, stderr = run_command("which certbot")
-        if returncode != 0:
-            print_error("Failed to install certbot")
-            print_error("Please try installing certbot manually:")
-            print_error("sudo snap install --classic certbot")
-            print_error("sudo ln -s /snap/bin/certbot /usr/bin/certbot")
-            sys.exit(1)
+        print_error("Failed to install certbot")
+        print_error("Please try installing certbot manually:")
+        print_error("sudo snap install --classic certbot")
+        print_error("sudo ln -s /snap/bin/certbot /usr/bin/certbot")
+        sys.exit(1)
     
     print_debug("Certbot installation verified successfully")
 
