@@ -109,7 +109,6 @@ def install_packages() -> None:
         'software-properties-common',
         'net-tools',
         'snapd',
-        'python3-yaml',
         'curl'  # Ensure curl is installed for healthcheck
     ]
     
@@ -318,32 +317,34 @@ def get_ssl_certificate(domain: str, email: str) -> None:
 def create_conduwuit_config(domain: str, turn_domain: str, secret_key: str, turn_secret: str) -> None:
     """Create Conduwuit configuration file"""
     print_debug("Creating Conduwuit configuration...")
-    config = {
-        "server_name": domain,
-        "database_path": "/data/conduwuit.db",
-        "signing_key": secret_key,
-        "enable_registration": False,
-        "report_stats": False,
-        "turn": {
-            "uris": [
-                f"turn:{turn_domain}:3478",
-                f"turns:{turn_domain}:5349"
-            ],
-            "secret": turn_secret,
-            "ttl": 86400
-        },
-        "tls": {
-            "certs": "/certs/fullchain.pem",
-            "key": "/certs/privkey.pem"
-        }
-    }
+    
+    config = f"""# Server configuration
+server_name = "{domain}"
+database_path = "/data/conduwuit.db"
+signing_key = "{secret_key}"
+enable_registration = false
+report_stats = false
+
+# TURN configuration
+[turn]
+uris = [
+    "turn:{turn_domain}:3478",
+    "turns:{turn_domain}:5349"
+]
+secret = "{turn_secret}"
+ttl = 86400
+
+# TLS configuration
+[tls]
+certs = "/certs/fullchain.pem"
+key = "/certs/privkey.pem"
+"""
     
     data_dir = Path("/opt/conduwuit/data")
     data_dir.mkdir(parents=True, exist_ok=True)
     
-    import yaml
     with open(data_dir / "conduwuit.yaml", "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+        f.write(config)
 
 def setup_conduwuit(domain: str, turn_domain: str, email: str, admin_user: str, admin_pass: str) -> None:
     """Setup Conduwuit"""
