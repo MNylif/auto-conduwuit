@@ -685,39 +685,40 @@ services:
     print_debug("Stopping any existing containers...")
     run_command("docker-compose down")
     
-    # Start services with proper error handling
-    print_debug("Starting containers...")
-    returncode, stdout, stderr = run_command("docker-compose up -d")
-    if returncode != 0:
-        print_error("Failed to start containers")
-        print_error(f"Error: {stderr}")
-        sys.exit(1)
-    
-    # Wait for services and check health with improved diagnostics
+    # Wait for services with improved health checking
     print_debug("Waiting for services to be ready...")
-    max_wait_time = 120  # Increase timeout to 2 minutes
+    max_wait_time = 180  # Increase timeout to 3 minutes
     check_interval = 5
     start_time = time.time()
     
-    def check_container_logs():
-        """Check container logs for common issues"""
-        returncode, stdout, stderr = run_command("docker-compose logs --tail=50")
-        logs = stdout.lower()
-        
-        # Check for common error patterns
-        if "error" in logs or "failed" in logs or "panic" in logs:
-            print_warning("Found potential issues in container logs:")
-            print(stdout)
-            return False
-        return True
-    
-    def check_container_status():
-        """Check detailed container status"""
-        returncode, stdout, stderr = run_command("docker-compose ps")
+    def check_services():
+        """Check if services are running and healthy"""
+        # First check if containers are running
+        returncode, stdout, stderr = run_command("docker-compose ps -a")
         if "Exit" in stdout or "Restarting" in stdout:
-            print_warning("Container status shows issues:")
+            print_warning("Containers are not running properly:")
             print(stdout)
             return False
+        
+        # Check Conduwuit container specifically
+        returncode, stdout, stderr = run_command("docker-compose ps conduwuit")
+        if "Up" not in stdout or "healthy" not in stdout.lower():
+            print_warning("Conduwuit container is not healthy:")
+            print(stdout)
+            
+            # Check logs for specific issues
+            returncode, logs, stderr = run_command("docker-compose logs conduwuit --tail=50")
+            if logs:
+                print_debug("Conduwuit logs:")
+                print(logs)
+            return False
+        
+        # Try to access the health endpoint
+        returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
+        if returncode != 0 or stdout.strip() != "200":
+            print_warning("Health endpoint is not responding")
+            return False
+        
         return True
     
     while time.time() - start_time < max_wait_time:
@@ -728,20 +729,8 @@ services:
                       prefix="Waiting for services:", 
                       suffix=f"Time remaining: {remaining}s")
         
-        # Check container status
-        if not check_container_status():
-            print_debug("Checking container logs for issues...")
-            check_container_logs()
-            
-            # Show troubleshooting menu
-            if not troubleshoot.show_menu("container startup", "docker-compose logs"):
-                return False
-            continue
-        
-        # Try to access the health endpoint
-        returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
-        if returncode == 0 and stdout.strip() == "200":
-            print_message("\nService is healthy and responding")
+        if check_services():
+            print_message("\nServices are healthy and responding")
             break
         
         # If we've waited more than half the timeout, show detailed status
@@ -910,11 +899,61 @@ class TroubleshootingMenu:
         """Fix common Conduwuit issues"""
         print_debug("Attempting to fix Conduwuit...")
         
-        run_command("docker-compose down")
-        time.sleep(2)
-        run_command("docker-compose up -d")
+        # First, check if containers are running
+        returncode, stdout, stderr = run_command("docker-compose ps")
+        if "Exit" in stdout or "Restarting" in stdout:
+            print_debug("Containers are not running properly, attempting restart...")
+            run_command("docker-compose down")
+            time.sleep(2)
+            run_command("docker-compose up -d")
+            time.sleep(10)  # Give more time for initial startup
+            
+            # Check container status again
+            returncode, stdout, stderr = run_command("docker-compose ps")
+            if "Exit" in stdout or "Restarting" in stdout:
+                print_warning("Containers still not running properly after restart")
+                return False
         
-        return True
+        # Check container logs for specific issues
+        returncode, stdout, stderr = run_command("docker-compose logs conduwuit --tail=50")
+        logs = stdout.lower()
+        
+        if "error" in logs or "panic" in logs:
+            print_debug("Found errors in Conduwuit logs:")
+            print(stdout)
+            
+            # Check for specific error patterns and apply fixes
+            if "permission denied" in logs:
+                print_debug("Fixing permissions...")
+                run_command("chmod -R 755 /opt/conduwuit/data")
+                run_command("chown -R root:root /opt/conduwuit/data")
+            elif "connection refused" in logs:
+                print_debug("Container networking issue, recreating network...")
+                run_command("docker-compose down")
+                run_command("docker network prune -f")
+                run_command("docker-compose up -d")
+            elif "no such file or directory" in logs:
+                print_debug("Recreating missing directories...")
+                run_command("mkdir -p /opt/conduwuit/data")
+                run_command("mkdir -p /opt/conduwuit/certs")
+                run_command("chmod -R 755 /opt/conduwuit")
+            
+            # Restart after applying fixes
+            print_debug("Restarting services after fixes...")
+            run_command("docker-compose restart")
+            time.sleep(10)
+        
+        # Verify service is responding
+        print_debug("Checking if service is responding...")
+        max_retries = 3
+        for i in range(max_retries):
+            returncode, stdout, stderr = run_command("curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/_matrix/client/versions")
+            if returncode == 0 and stdout.strip() == "200":
+                print_message("Service is now responding")
+                return True
+            time.sleep(5)
+        
+        return False
 
 # Initialize global progress tracker and troubleshooting menu
 progress = InstallationProgress()
@@ -933,8 +972,20 @@ def wait_for_operation(operation: str, check_func, timeout: int = 60, check_inte
             
         if time.time() - start_time > timeout // 2:  # Show menu after half the timeout
             progress.stop_spinner()
+            
+            # Show current status
+            print_debug("\nCurrent Status:")
+            returncode, stdout, stderr = run_command("docker-compose ps")
+            print(stdout)
+            
+            returncode, stdout, stderr = run_command("docker-compose logs --tail=20")
+            if stdout:
+                print_debug("Recent logs:")
+                print(stdout)
+            
             if not troubleshoot.show_menu(operation, logs_cmd):
                 return False
+                
             progress.start_spinner(f"Continuing to wait for {operation}...")
             
         time.sleep(check_interval)
